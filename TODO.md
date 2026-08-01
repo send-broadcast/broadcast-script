@@ -1,3 +1,35 @@
+# TODO
+
+## Support tooling (from broadcast/TROUBLESHOOT.md, firstborngroup 520 case)
+
+Source: 2-day outage where Puma died inside the app container while Thruster
+(PID 1) kept serving 502s — `docker ps` showed "Up", restart policies never
+fired, and the standard remediation (`broadcast.sh restart`) destroyed the
+container logs that held the evidence.
+
+- [x] **`./broadcast.sh diagnose`** — shipped TDD-first (2026-08-01;
+      tests/unit/test_diagnose.sh written red, then scripts/diagnose.sh).
+      Captures FULL container logs FIRST (restart wipes them), a
+      noise-filtered app log, docker/system state, kernel OOM check, and
+      layered health probes (Puma direct via docker exec, Thruster HTTP,
+      HTTPS origin via curl --resolve) with an interpretation summary that
+      flags the Thruster-up/Puma-down fingerprint and only recommends
+      restart AFTER evidence is captured. Produces a tarball for a
+      one-round-trip support email. Consider a smoke-test phase exercising
+      it on a real VM in a future pass.
+- [ ] **App container healthcheck + restart-on-unhealthy** — compose has no
+      healthcheck on `app`, and Thruster surviving Puma's death means
+      `restart: always` never triggers. Decide the mechanism deliberately:
+      compose `healthcheck` on `localhost:3000/up` is visibility only — the
+      restart action needs either the monitor/trigger cron reacting to
+      `unhealthy`, or the image entrypoint exiting when Puma dies (Rails-repo
+      change). Validate in the smoke VM.
+- [ ] **Stop `broadcast.sh restart` from destroying logs** — the systemd unit
+      uses `ExecStop=docker compose down`, which removes containers and all
+      their logs. Options: forward logging to journald, mount a log volume,
+      or ExecStop=stop (semantics change — needs thought). Interim
+      mitigation: diagnose captures logs before any restart advice.
+
 # TODO: Test Coverage Expansion
 
 Goal: real test coverage for every management script, so a regression in the

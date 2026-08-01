@@ -107,6 +107,14 @@ Test the real functions from the management scripts in isolation.
 - Full restore() pipeline against a scratch root: file resolution,
   confirmation, checksum sidecar verification, version gate, cleanup
 
+**test_diagnose.sh** (real `diagnose.sh`):
+- Support-bundle collection: full container logs captured before any probe
+  (never `--tail`), Thruster noise filtered while crash lines survive,
+  layered probes (Puma direct / Thruster HTTP / HTTPS origin via
+  `--resolve`), the Thruster-up/Puma-down fingerprint in the summary,
+  OOM/system state capture, tarball output, and exit 0 even when every
+  collector fails
+
 ### Integration Tests (`tests/integration/`)
 
 Test complete workflows through the real scripts.

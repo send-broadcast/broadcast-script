@@ -31,7 +31,7 @@ SANDBOX_CALLS=""
 
 # Scripts loaded into every sandbox, in source order (common first; restore
 # defines compare_versions used by others).
-HARNESS_SCRIPTS="common.sh restore.sh backup.sh update.sh upgrade.sh downgrade.sh trigger.sh monitor.sh init-services.sh"
+HARNESS_SCRIPTS="common.sh restore.sh backup.sh update.sh upgrade.sh downgrade.sh trigger.sh monitor.sh diagnose.sh init-services.sh"
 
 harness_make_sandbox() {
     SANDBOX_ROOT=$(mktemp -d)
@@ -179,7 +179,7 @@ harness_assert_called() {
     local pattern="$1"
     local message="${2:-}"
 
-    if ! /usr/bin/grep -qF "$pattern" "$SANDBOX_CALLS"; then
+    if ! /usr/bin/grep -qF -- "$pattern" "$SANDBOX_CALLS"; then
         echo -e "${RED}Assertion failed: no call matching '$pattern' was recorded${NC}"
         [ -n "$message" ] && echo -e "${RED}Message: $message${NC}"
         echo "Recorded calls:"
@@ -194,7 +194,7 @@ harness_assert_not_called() {
     local pattern="$1"
     local message="${2:-}"
 
-    if /usr/bin/grep -qF "$pattern" "$SANDBOX_CALLS"; then
+    if /usr/bin/grep -qF -- "$pattern" "$SANDBOX_CALLS"; then
         echo -e "${RED}Assertion failed: unexpected call matching '$pattern' was recorded${NC}"
         [ -n "$message" ] && echo -e "${RED}Message: $message${NC}"
         TEST_FAILED=true
