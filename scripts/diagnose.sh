@@ -15,6 +15,19 @@
 #     masquerades as a certificate failure.
 #   - Every collector is fallible; none may abort the bundle. Exit 0 always.
 
+# Ownership check for the permission doctor: install.sh chowns these paths
+# to broadcast:broadcast, and drift breaks pulls/backups in confusing ways.
+function diagnose_check_owner() {
+  local path="$1" owner
+  owner=$(stat -c %U "$path" 2>/dev/null) || { echo "WARN: cannot stat $path"; return 0; }
+  if [ "$owner" = "broadcast" ]; then
+    echo "ok: $path owned by broadcast"
+  else
+    echo "WARN: $path owned by $owner (expected broadcast; run: chown -R broadcast:broadcast /opt/broadcast)"
+  fi
+  return 0
+}
+
 function diagnose() {
   local timestamp
   timestamp=$(date +%Y-%m-%d-%H-%M-%S)
@@ -47,12 +60,120 @@ function diagnose() {
     echo "no kernel OOM events in the last 3 days" > "$bundle/oom.txt"
   fi
 
-  # 5. Layered probes
-  local puma_code thruster_code https_code="skipped" domain=""
-  puma_code=$(docker exec app curl -s -o /dev/null -w "%{http_code}" -m 10 http://localhost:3000/up 2>/dev/null) || puma_code="000"
-  thruster_code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 http://localhost/up 2>/dev/null) || thruster_code="000"
+  local domain=""
   if [ -f /opt/broadcast/.domain ]; then
     domain=$(cat /opt/broadcast/.domain)
+  fi
+
+  # 5. Who ran this, and is the installation shaped the way install.sh
+  # leaves it (brew-doctor style: ok/WARN per check)
+  {
+    echo "user: $(whoami 2>/dev/null || echo unknown)"
+    id 2>/dev/null || true
+  } > "$bundle/identity.txt"
+
+  {
+    diagnose_check_owner /opt/broadcast
+    diagnose_check_owner /opt/broadcast/app
+    [ -f /opt/broadcast/app/.env ] && diagnose_check_owner /opt/broadcast/app/.env
+    diagnose_check_owner /opt/broadcast/db/backups
+    if [ -x /opt/broadcast/broadcast.sh ]; then
+      echo "ok: broadcast.sh is executable"
+    else
+      echo "WARN: broadcast.sh is not executable (chmod +x /opt/broadcast/broadcast.sh)"
+    fi
+    if id -nG broadcast 2>/dev/null | grep -qw docker; then
+      echo "ok: broadcast user is in the docker group"
+    else
+      echo "WARN: broadcast user is not in the docker group"
+    fi
+    if [ -f /etc/sudoers.d/broadcast ]; then
+      echo "ok: sudoers entry present"
+    else
+      echo "WARN: /etc/sudoers.d/broadcast missing"
+    fi
+  } > "$bundle/doctor.txt" 2>&1 || true
+
+  # 6. System specs, OS, and time sync
+  {
+    echo "--- OS ---"
+    cat /etc/os-release 2>/dev/null || true
+    uname -a 2>/dev/null || true
+    echo
+    echo "--- CPU ---"
+    echo "cores: $(nproc 2>/dev/null || echo unknown)"
+    grep -m1 "model name" /proc/cpuinfo 2>/dev/null || true
+    echo
+    echo "--- Disk ---"
+    df -h 2>&1 || true
+    echo "--- Inodes (a full inode table breaks writes even with free space) ---"
+    df -i / 2>&1 || true
+    echo
+    echo "--- Memory ---"
+    free -m 2>&1 || true
+    echo
+    echo "--- Load ---"
+    uptime 2>&1 || true
+    echo
+    echo "--- Time sync (clock skew breaks email provider signatures) ---"
+    timedatectl 2>/dev/null | head -8 || true
+  } > "$bundle/system.txt"
+
+  # 7. What else is running on this host
+  {
+    echo "--- Top processes by memory ---"
+    ps aux --sort=-%mem 2>/dev/null | head -16 || true
+    echo
+    echo "--- Top processes by CPU ---"
+    ps aux --sort=-%cpu 2>/dev/null | head -16 || true
+  } > "$bundle/processes.txt"
+
+  # 8. Port listeners + firewall. A non-Docker process on 80/443 (customer
+  # installed nginx/apache) silently steals traffic from Thruster.
+  {
+    ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null || echo "no ss/netstat available"
+    echo
+    echo "--- Firewall ---"
+    ufw status 2>/dev/null || true
+  } > "$bundle/ports.txt"
+  if grep -E "(:80|:443)[[:space:]]" "$bundle/ports.txt" 2>/dev/null \
+      | grep -viE "docker|thruster" | grep -q .; then
+    echo "WARN: a non-Docker process is listening on port 80/443 (see listeners above) — another web server may be stealing Broadcast's traffic" >> "$bundle/ports.txt"
+  fi
+
+  # 9. Live SSL certificate (SNI required — see header note on --resolve)
+  if [ -n "$domain" ]; then
+    echo | openssl s_client -servername "$domain" -connect 127.0.0.1:443 2>/dev/null \
+      | openssl x509 -noout -subject -issuer -dates > "$bundle/ssl.txt" 2>&1 \
+      || echo "could not read the certificate for $domain (Thruster down, or no cert issued yet)" > "$bundle/ssl.txt"
+  else
+    echo "no .domain configured; certificate check skipped" > "$bundle/ssl.txt"
+  fi
+
+  # 10. Versions and container lifecycle (restart counts and start times
+  # date an incident: "recreated N days ago" was the timing clue in the
+  # original outage)
+  {
+    echo "broadcast version: $(cat /opt/broadcast/.current_version 2>/dev/null || echo unknown)"
+    cat /opt/broadcast/.image 2>/dev/null || true
+    echo "scripts revision: $(git -C /opt/broadcast rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    docker --version 2>/dev/null || true
+    echo
+    echo "--- Docker disk usage ---"
+    docker system df 2>&1 || true
+    echo
+    echo "--- Container lifecycle ---"
+    local c
+    for c in app job postgres; do
+      docker inspect --format "{{.Name}}: restarts={{.RestartCount}} started={{.State.StartedAt}}" "$c" 2>/dev/null || true
+    done
+  } > "$bundle/versions.txt"
+
+  # 11. Layered probes
+  local puma_code thruster_code https_code="skipped"
+  puma_code=$(docker exec app curl -s -o /dev/null -w "%{http_code}" -m 10 http://localhost:3000/up 2>/dev/null) || puma_code="000"
+  thruster_code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 http://localhost/up 2>/dev/null) || thruster_code="000"
+  if [ -n "$domain" ]; then
     https_code=$(curl -sk --resolve "$domain:443:127.0.0.1" -o /dev/null -w "%{http_code}" -m 35 "https://$domain/up" 2>/dev/null) || https_code="000"
   fi
 
@@ -97,17 +218,32 @@ function diagnose() {
   # thousands of lines — they cannot ride in a paste).
   echo
   echo "=============== COPY FROM HERE FOR YOUR SUPPORT EMAIL ==============="
+  echo "--- Versions ---"
+  cat "$bundle/versions.txt" 2>/dev/null || true
+  echo
   echo "--- Summary ---"
   cat "$bundle/summary.txt" 2>/dev/null || true
   echo
   echo "--- Health probes ---"
   cat "$bundle/probes.txt" 2>/dev/null || true
   echo
+  echo "--- Permission doctor ---"
+  cat "$bundle/doctor.txt" 2>/dev/null || true
+  echo
+  echo "--- SSL certificate ---"
+  cat "$bundle/ssl.txt" 2>/dev/null || true
+  echo
+  echo "--- Ports and firewall ---"
+  cat "$bundle/ports.txt" 2>/dev/null || true
+  echo
   echo "--- Containers ---"
   cat "$bundle/docker-ps.txt" 2>/dev/null || true
   echo
-  echo "--- System (disk / memory / load) ---"
+  echo "--- System (OS / CPU / disk / memory / load / time) ---"
   cat "$bundle/system.txt" 2>/dev/null || true
+  echo
+  echo "--- Top processes ---"
+  head -20 "$bundle/processes.txt" 2>/dev/null || true
   echo
   echo "--- Kernel OOM check ---"
   head -20 "$bundle/oom.txt" 2>/dev/null || true

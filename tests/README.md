@@ -111,9 +111,12 @@ Test the real functions from the management scripts in isolation.
 - Support-bundle collection: full container logs captured before any probe
   (never `--tail`), Thruster noise filtered while crash lines survive,
   layered probes (Puma direct / Thruster HTTP / HTTPS origin via
-  `--resolve`), the Thruster-up/Puma-down fingerprint in the summary,
-  OOM/system state capture, tarball output, and exit 0 even when every
-  collector fails
+  `--resolve`), 301-redirect-is-healthy verdict, identity + permission
+  doctor (WARN on ownership drift, clean on a correct install), system
+  specs, top processes, port listeners with foreign-webserver warning,
+  SSL certificate status, version/container lifecycle capture, the
+  copy-paste report contents, OOM/system state capture, tarball output,
+  and exit 0 even when every collector fails
 
 ### Integration Tests (`tests/integration/`)
 
