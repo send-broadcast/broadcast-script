@@ -114,9 +114,13 @@ Test the real functions from the management scripts in isolation.
   `--resolve`), 301-redirect-is-healthy verdict, identity + permission
   doctor (WARN on ownership drift, clean on a correct install), system
   specs, top processes, port listeners with foreign-webserver warning,
-  SSL certificate status, version/container lifecycle capture, the
-  copy-paste report contents, OOM/system state capture, tarball output,
-  and exit 0 even when every collector fails
+  SSL certificate status, version/container lifecycle capture, job-queue
+  health via psql (with failed-job warnings), database health and
+  pending-migration detection, backup freshness warnings, disk
+  attribution, incident timeline, cron liveness, job/postgres error
+  views, outbound network and SMTP egress checks, the copy-paste report
+  contents, OOM/system state capture, tarball output, and exit 0 even
+  when every collector fails
 
 ### Integration Tests (`tests/integration/`)
 

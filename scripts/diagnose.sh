@@ -49,6 +49,13 @@ function diagnose() {
   grep -viE '"msg":"Request"|Unable to proxy|TLS handshake' "$bundle/app.log" 2>/dev/null \
     | tail -200 > "$bundle/app-filtered.log" || true
 
+  # Error-only views of the other containers: Solid Queue exceptions and
+  # postgres FATAL/ERROR lines fail silently from the operator's view
+  grep -iE "error|exception|fatal" "$bundle/job.log" 2>/dev/null \
+    | tail -100 > "$bundle/job-errors.log" || true
+  grep -iE "fatal|error|panic" "$bundle/postgres.log" 2>/dev/null \
+    | tail -50 > "$bundle/postgres-errors.log" || true
+
   # 3. Container and system state
   docker ps > "$bundle/docker-ps.txt" 2>&1 || true
   docker stats --no-stream > "$bundle/docker-stats.txt" 2>&1 || true
@@ -169,7 +176,122 @@ function diagnose() {
     done
   } > "$bundle/versions.txt"
 
-  # 11. Layered probes
+  # 11. Job queue health, read via psql against the postgres container so a
+  # wedged or dead app container cannot block queue inspection. "My emails
+  # aren't sending" is the most common support opener; a deep ready queue
+  # with an old head, or piled-up failed jobs, answers it immediately.
+  local psql_queue="docker exec postgres psql -U broadcast -d broadcast_queue_production -t -A -c"
+  local failed_jobs
+  failed_jobs=$($psql_queue "SELECT COUNT(*) FROM solid_queue_failed_executions" 2>/dev/null) || failed_jobs="unknown"
+  {
+    echo "ready jobs: $($psql_queue "SELECT COUNT(*) FROM solid_queue_ready_executions" 2>/dev/null || echo unknown)"
+    echo "scheduled jobs: $($psql_queue "SELECT COUNT(*) FROM solid_queue_scheduled_executions" 2>/dev/null || echo unknown)"
+    echo "failed jobs: $failed_jobs"
+    echo "oldest ready job age (seconds): $($psql_queue "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MIN(created_at)))::int, 0) FROM solid_queue_ready_executions" 2>/dev/null || echo unknown)"
+    case "$failed_jobs" in
+      ""|0|unknown) : ;;
+      *) echo "WARN: $failed_jobs failed jobs — inspect the job queue in the dashboard" ;;
+    esac
+  } > "$bundle/queue.txt"
+
+  # 12. Database health: pool exhaustion mimics an app hang, and pending
+  # migrations after an upgrade/restore cause confusing partial failures
+  local psql_primary="docker exec postgres psql -U broadcast -d broadcast_primary_production -t -A -c"
+  {
+    echo "active connections: $($psql_primary "SELECT COUNT(*) FROM pg_stat_activity" 2>/dev/null || echo unknown)"
+    echo "max_connections: $($psql_primary "SHOW max_connections" 2>/dev/null || echo unknown)"
+    echo
+    echo "--- Database sizes ---"
+    $psql_primary "SELECT datname || ': ' || pg_size_pretty(pg_database_size(datname)) FROM pg_database WHERE datname LIKE 'broadcast%'" 2>/dev/null || true
+    echo
+    echo "--- Queries running longer than 30s ---"
+    $psql_primary "SELECT pid || ' ' || state || ' ' || (now() - query_start) || ' ' || LEFT(query, 80) FROM pg_stat_activity WHERE state <> 'idle' AND now() - query_start > interval '30 seconds'" 2>/dev/null || true
+    echo
+    if docker exec app bin/rails db:migrate:status 2>/dev/null | grep -q "^ *down"; then
+      echo "WARN: pending database migrations — run the upgrade again or contact support"
+    else
+      echo "ok: no pending migrations detected"
+    fi
+  } > "$bundle/database.txt"
+
+  # 13. Backup freshness: a customer who believes they have backups but
+  # whose newest one is months old is a disaster in waiting
+  {
+    if ls /opt/broadcast/db/backups/broadcast-backup-*.tar.gz >/dev/null 2>&1; then
+      ls -lt /opt/broadcast/db/backups/broadcast-backup-* 2>/dev/null | head -5
+      if find /opt/broadcast/db/backups -name "broadcast-backup-*.tar.gz" -mtime -7 2>/dev/null | grep -q .; then
+        echo "ok: newest backup is less than 7 days old"
+      else
+        echo "WARN: newest backup is more than 7 days old — trigger a fresh backup from the dashboard"
+      fi
+    else
+      echo "WARN: no database backups found in db/backups — trigger one from the dashboard"
+    fi
+  } > "$bundle/backups.txt"
+
+  # 14. Disk attribution: "disk 92% full" means nothing until you know
+  # whether postgres, uploads, logs, or dead Docker images grew
+  {
+    du -sh /opt/broadcast/db/postgres-data 2>/dev/null || true
+    du -sh /opt/broadcast/app/storage 2>/dev/null || true
+    du -sh /opt/broadcast/app/uploads 2>/dev/null || true
+    du -sh /opt/broadcast/logs 2>/dev/null || true
+    echo "(Docker image usage is in versions.txt)"
+  } > "$bundle/storage.txt"
+
+  # 15. Incident timeline: upgrades, domain changes, reboots, failed
+  # units, surprise unattended upgrades, and cgroup OOM kills (which the
+  # kernel-journal check does not see)
+  {
+    echo "--- Version history ---"
+    tail -10 /opt/broadcast/.version_history 2>/dev/null || echo "none"
+    echo
+    echo "--- Domain history ---"
+    tail -5 /opt/broadcast/.domain_history 2>/dev/null || echo "none"
+    echo
+    echo "--- Reboots ---"
+    last reboot 2>/dev/null | head -5 || true
+    echo
+    echo "--- Failed systemd units ---"
+    systemctl --failed 2>/dev/null || true
+    echo
+    echo "--- Unattended upgrades (recent) ---"
+    tail -20 /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null || echo "no log"
+    echo
+    echo "--- Container OOM flags ---"
+    local tc
+    for tc in app job postgres; do
+      docker inspect --format "{{.Name}}: OOMKilled={{.State.OOMKilled}} exit={{.State.ExitCode}}" "$tc" 2>/dev/null || true
+    done
+  } > "$bundle/timeline.txt"
+
+  # 16. Cron liveness: dead cron means no monitoring, no triggers, no
+  # updates — and nothing complains until the dashboard goes stale
+  {
+    ls -l /opt/broadcast/logs/cron/ 2>/dev/null || echo "no cron log directory"
+    if find /opt/broadcast/logs/cron -name "*.log" -mmin -10 2>/dev/null | grep -q .; then
+      echo "ok: cron jobs wrote logs within the last 10 minutes"
+    else
+      echo "WARN: no cron log activity in the last 10 minutes — the monitor/trigger cron jobs may be dead"
+    fi
+  } > "$bundle/cron.txt"
+
+  # 17. Outbound network: blocked egress fails silently, and cloud hosts
+  # commonly block SMTP ports by default
+  {
+    echo "license server (sendbroadcast.net): $(curl -s -o /dev/null -w "%{http_code}" -m 10 https://sendbroadcast.net 2>/dev/null || echo unreachable)"
+    echo "general internet (checkip.amazonaws.com): $(curl -s -o /dev/null -w "%{http_code}" -m 10 https://checkip.amazonaws.com 2>/dev/null || echo unreachable)"
+    local port
+    for port in 25 587; do
+      if timeout 5 bash -c "</dev/tcp/aspmx.l.google.com/$port" 2>/dev/null; then
+        echo "smtp egress port $port: open"
+      else
+        echo "smtp egress port $port: blocked or filtered"
+      fi
+    done
+  } > "$bundle/network.txt"
+
+  # 18. Layered probes
   local puma_code thruster_code https_code="skipped"
   puma_code=$(docker exec app curl -s -o /dev/null -w "%{http_code}" -m 10 http://localhost:3000/up 2>/dev/null) || puma_code="000"
   thruster_code=$(curl -s -o /dev/null -w "%{http_code}" -m 10 http://localhost/up 2>/dev/null) || thruster_code="000"
@@ -227,6 +349,15 @@ function diagnose() {
   echo "--- Health probes ---"
   cat "$bundle/probes.txt" 2>/dev/null || true
   echo
+  echo "--- Job queue ---"
+  cat "$bundle/queue.txt" 2>/dev/null || true
+  echo
+  echo "--- Database ---"
+  cat "$bundle/database.txt" 2>/dev/null || true
+  echo
+  echo "--- Backups ---"
+  cat "$bundle/backups.txt" 2>/dev/null || true
+  echo
   echo "--- Permission doctor ---"
   cat "$bundle/doctor.txt" 2>/dev/null || true
   echo
@@ -235,6 +366,18 @@ function diagnose() {
   echo
   echo "--- Ports and firewall ---"
   cat "$bundle/ports.txt" 2>/dev/null || true
+  echo
+  echo "--- Outbound network ---"
+  cat "$bundle/network.txt" 2>/dev/null || true
+  echo
+  echo "--- Cron liveness ---"
+  cat "$bundle/cron.txt" 2>/dev/null || true
+  echo
+  echo "--- Disk attribution ---"
+  cat "$bundle/storage.txt" 2>/dev/null || true
+  echo
+  echo "--- Timeline (versions / reboots / OOM) ---"
+  cat "$bundle/timeline.txt" 2>/dev/null || true
   echo
   echo "--- Containers ---"
   cat "$bundle/docker-ps.txt" 2>/dev/null || true

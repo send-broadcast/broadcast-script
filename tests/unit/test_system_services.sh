@@ -77,9 +77,13 @@ exit 0'
 # --- post-upgrade-cleanup.sh ----------------------------------------------
 
 # Run the unmodified cleanup script with the sandbox mocks first on PATH.
-# DOCKER_MOCK_DOWN_CONTAINER marks one container as not running;
-# DATE_MOCK_*_EPOCH control the computed container uptime.
+# DOCKER_MOCK_DOWN_CONTAINER marks one container as not running.
+# The date mock advances time by 100s on every `date +%s` call (counter
+# file per run) so the script's poll loop moves forward: container uptime
+# is (advancing now - DATE_MOCK_STARTED_EPOCH), and the give-up deadline
+# is eventually reached. DATE_MOCK_NOW_EPOCH sets the starting "now".
 run_cleanup_script() {
+    rm -f "$SANDBOX_ROOT/date-calls"
     harness_mock docker 'case "$*" in
   *"{{.State.Status}}"*)
     if [ "${!#}" = "${DOCKER_MOCK_DOWN_CONTAINER:-}" ]; then echo "exited"; else echo "running"; fi ;;
@@ -88,11 +92,18 @@ esac
 exit 0'
     harness_mock date 'case "$*" in
   *"-d"*) echo "${DATE_MOCK_STARTED_EPOCH:-1000}" ;;
-  "+%s") echo "${DATE_MOCK_NOW_EPOCH:-2000}" ;;
+  "+%s")
+    n=$(cat "${DATE_MOCK_COUNTER:?}" 2>/dev/null || echo 0)
+    n=$((n + 1))
+    echo "$n" > "$DATE_MOCK_COUNTER"
+    echo $(( ${DATE_MOCK_NOW_EPOCH:-2000} + (n - 1) * 100 ))
+    ;;
   *) echo "2026-01-01 00:00:00 UTC" ;;
 esac'
 
-    PATH="$SANDBOX_ROOT/mocks:$PATH" bash "$HARNESS_PROJECT_ROOT/scripts/post-upgrade-cleanup.sh" 2>&1
+    DATE_MOCK_COUNTER="$SANDBOX_ROOT/date-calls" \
+        PATH="$SANDBOX_ROOT/mocks:$PATH" \
+        bash "$HARNESS_PROJECT_ROOT/scripts/post-upgrade-cleanup.sh" 2>&1
 }
 
 test_cleanup_prunes_when_all_containers_are_stable() {
@@ -103,24 +114,29 @@ test_cleanup_prunes_when_all_containers_are_stable() {
     harness_assert_called "docker image prune -af" "stable containers allow the prune"
 }
 
-test_cleanup_skips_when_a_container_is_not_running() {
+test_cleanup_gives_up_when_a_container_never_runs() {
     local output
     output=$(DOCKER_MOCK_DOWN_CONTAINER=job run_cleanup_script)
 
     assert_contains "$output" "'job' is not running" "the down container should be named"
-    assert_contains "$output" "Skipping cleanup" "cleanup must be skipped"
+    assert_contains "$output" "Skipping cleanup" "cleanup must eventually be skipped"
     harness_assert_not_called "docker image prune" \
         "prune must not run while a container is down"
 }
 
-test_cleanup_skips_when_a_container_restarted_too_recently() {
-    # Uptime of 30s is under the 60s stability threshold
+test_cleanup_waits_out_a_fresh_restart_then_prunes() {
+    # The real-world case that silently disabled pruning on production: the
+    # cleanup service starts alongside the stack, so at first check the
+    # containers have been up slightly less than the 60s stability
+    # threshold. A one-shot check skips forever; the script must poll until
+    # the containers age past the threshold and then prune.
     local output
     output=$(DATE_MOCK_STARTED_EPOCH=1000 DATE_MOCK_NOW_EPOCH=1030 run_cleanup_script)
 
-    assert_contains "$output" "need 60s" "the unmet threshold should be reported"
-    harness_assert_not_called "docker image prune" \
-        "prune must not run for a freshly restarted container"
+    harness_assert_called "docker image prune -af" \
+        "a container that stabilizes during the wait must still be pruned"
+    assert_contains "$output" "All containers stable" \
+        "stability reached after waiting should be confirmed"
 }
 
 run_system_service_tests() {
@@ -137,8 +153,8 @@ run_system_service_tests() {
     run_test "test_create_service_disables_an_active_service_first" test_create_service_disables_an_active_service_first
     run_test "test_create_service_skips_disable_when_not_active" test_create_service_skips_disable_when_not_active
     run_test "test_cleanup_prunes_when_all_containers_are_stable" test_cleanup_prunes_when_all_containers_are_stable
-    run_test "test_cleanup_skips_when_a_container_is_not_running" test_cleanup_skips_when_a_container_is_not_running
-    run_test "test_cleanup_skips_when_a_container_restarted_too_recently" test_cleanup_skips_when_a_container_restarted_too_recently
+    run_test "test_cleanup_gives_up_when_a_container_never_runs" test_cleanup_gives_up_when_a_container_never_runs
+    run_test "test_cleanup_waits_out_a_fresh_restart_then_prunes" test_cleanup_waits_out_a_fresh_restart_then_prunes
 
     local result
     print_test_summary

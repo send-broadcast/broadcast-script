@@ -27,16 +27,31 @@ setup_sandbox() {
     echo "Puma caught this error: Broken pipe (Errno::EPIPE)"
     echo "{\"msg\":\"Request\",\"path\":\"/track/click/2\"}"
     ;;
-  "logs job") echo "job container log line" ;;
-  "logs postgres") echo "postgres container log line" ;;
+  "logs job")
+    echo "job container log line"
+    echo "SolidQueue::Job Exception: something broke"
+    ;;
+  "logs postgres")
+    echo "postgres container log line"
+    echo "FATAL:  too many connections for role broadcast"
+    ;;
   exec\ app\ curl*)
     printf "%s" "${DIAGNOSE_PUMA_CODE:-200}"
     if [ "${DIAGNOSE_PUMA_CODE:-200}" = "000" ]; then exit 7; fi
     ;;
+  exec\ app\ bin/rails*) echo "${RAILS_MOCK_STATUS:-up     20260101000000  Create things}" ;;
+  exec\ postgres\ psql*) echo "${PSQL_MOCK_OUTPUT:-42}" ;;
+  inspect*) echo "/app: restarts=0 started=2026-07-31T11:48:19Z OOMKilled=false" ;;
   ps*) echo "NAMES STATUS: app Up 2 days" ;;
   stats*) echo "NAME CPU MEM: app 1% 512MB" ;;
 esac
 exit 0'
+    # Timeline / storage / network helpers
+    harness_mock du 'echo "1.2G ${!#}"'
+    harness_mock last 'echo "reboot   system boot  6.8.0-generic Thu Jul 31 11:47"'
+    harness_mock timeout 'exit "${TIMEOUT_MOCK_RC:-0}"'
+    echo "2026-07-31 11:00:00 | upgrade | 2.22.0 | 2.23.0" > "$SANDBOX_ROOT/.version_history"
+    mkdir -p "$SANDBOX_ROOT/logs/cron"
     # journalctl is Linux-only; canned output via JOURNALCTL_MOCK
     harness_mock journalctl 'echo "${JOURNALCTL_MOCK:-}"'
     # System metrics (free does not exist on macOS)
@@ -336,6 +351,151 @@ test_diagnose_report_includes_new_sections() {
     assert_contains "$output" "docker-proxy" "the paste report must include the port listeners"
 }
 
+test_diagnose_records_queue_health_and_warns_on_failed_jobs() {
+    # Queue state is read via psql against the postgres container, NOT via
+    # Rails — a wedged or dead app container must not block queue inspection.
+    sandbox_run "diagnose" >/dev/null
+
+    local dir queue
+    dir=$(bundle_dir)
+    assert_file_exists "${dir}queue.txt" "job queue health must be recorded"
+    queue=$(cat "${dir}queue.txt")
+    assert_contains "$queue" "ready jobs" "queue depth must be recorded"
+    assert_contains "$queue" "failed jobs" "failed-job count must be recorded"
+    # The psql mock reports 42 failed jobs — that must produce a warning
+    assert_contains "$queue" "WARN" "a non-zero failed-job count must warn"
+}
+
+test_diagnose_records_database_health() {
+    sandbox_run "diagnose" >/dev/null
+
+    local dir db
+    dir=$(bundle_dir)
+    assert_file_exists "${dir}database.txt" "database health must be recorded"
+    db=$(cat "${dir}database.txt")
+    assert_contains "$db" "active connections" "connection count must be recorded"
+    assert_contains "$db" "max_connections" "the connection ceiling must be recorded"
+    assert_contains "$db" "no pending migrations" \
+        "an up-to-date schema should be reported as ok"
+}
+
+test_diagnose_warns_on_pending_migrations() {
+    sandbox_run "diagnose" 'export RAILS_MOCK_STATUS="  down    20260801000000  Add new things"' >/dev/null
+
+    local dir
+    dir=$(bundle_dir)
+    assert_contains "$(cat "${dir}database.txt")" "WARN" \
+        "pending migrations must produce a warning"
+}
+
+test_diagnose_reports_fresh_backup_as_ok() {
+    touch "$SANDBOX_ROOT/db/backups/broadcast-backup-v2.23.0-2026-08-01-00-00-00.tar.gz"
+
+    sandbox_run "diagnose" >/dev/null
+
+    local dir backups
+    dir=$(bundle_dir)
+    assert_file_exists "${dir}backups.txt" "backup freshness must be recorded"
+    backups=$(cat "${dir}backups.txt")
+    assert_contains "$backups" "broadcast-backup-v2.23.0" "the newest backup must be listed"
+    assert_contains "$backups" "ok:" "a fresh backup should be reported ok"
+}
+
+test_diagnose_warns_when_no_backups_exist() {
+    sandbox_run "diagnose" >/dev/null
+
+    local dir
+    dir=$(bundle_dir)
+    assert_contains "$(cat "${dir}backups.txt")" "WARN" \
+        "an install with no backups must be flagged"
+}
+
+test_diagnose_attributes_disk_usage() {
+    sandbox_run "diagnose" >/dev/null
+
+    local dir
+    dir=$(bundle_dir)
+    assert_file_exists "${dir}storage.txt" "disk attribution must be recorded"
+    assert_contains "$(cat "${dir}storage.txt")" "uploads" \
+        "per-directory usage (e.g. uploads) must be attributed"
+}
+
+test_diagnose_records_timeline() {
+    sandbox_run "diagnose" >/dev/null
+
+    local dir timeline
+    dir=$(bundle_dir)
+    assert_file_exists "${dir}timeline.txt" "incident timeline must be recorded"
+    timeline=$(cat "${dir}timeline.txt")
+    assert_contains "$timeline" "upgrade | 2.22.0 | 2.23.0" \
+        "version history must be included"
+    assert_contains "$timeline" "reboot" "reboot history must be included"
+    assert_contains "$timeline" "OOMKilled" \
+        "container OOM flags must be included (cgroup kills miss the kernel journal)"
+}
+
+test_diagnose_cron_liveness() {
+    # Fresh cron log → ok
+    touch "$SANDBOX_ROOT/logs/cron/monitor.log"
+    sandbox_run "diagnose" >/dev/null
+    local dir
+    dir=$(bundle_dir)
+    assert_contains "$(cat "${dir}cron.txt")" "ok:" "recent cron activity should be ok"
+
+    # Stale cron logs → WARN (new bundle in the same sandbox)
+    touch -t 202601010000 "$SANDBOX_ROOT/logs/cron/monitor.log"
+    sandbox_run "diagnose" >/dev/null
+    dir=$(ls -dt "$SANDBOX_ROOT/logs/diagnose-"*/ | head -1)
+    assert_contains "$(cat "${dir}cron.txt")" "WARN" \
+        "stale cron logs mean dead automation and must warn"
+}
+
+test_diagnose_filters_job_and_postgres_errors() {
+    sandbox_run "diagnose" >/dev/null
+
+    local dir
+    dir=$(bundle_dir)
+    assert_file_exists "${dir}job-errors.log" "job error view must be produced"
+    assert_contains "$(cat "${dir}job-errors.log")" "SolidQueue::Job Exception" \
+        "job exceptions must surface in the error view"
+    assert_file_exists "${dir}postgres-errors.log" "postgres error view must be produced"
+    assert_contains "$(cat "${dir}postgres-errors.log")" "FATAL" \
+        "postgres FATAL lines must surface in the error view"
+}
+
+test_diagnose_checks_outbound_network() {
+    sandbox_run "diagnose" >/dev/null
+
+    local dir network
+    dir=$(bundle_dir)
+    assert_file_exists "${dir}network.txt" "outbound reachability must be recorded"
+    network=$(cat "${dir}network.txt")
+    assert_contains "$network" "sendbroadcast.net" "license server reachability must be checked"
+    assert_contains "$network" "smtp egress port 25" "SMTP egress must be checked"
+    assert_contains "$network" "open" "an open SMTP port should be reported open"
+    harness_assert_called "https://sendbroadcast.net" \
+        "the license server must actually be probed"
+}
+
+test_diagnose_reports_blocked_smtp_egress() {
+    sandbox_run "diagnose" 'export TIMEOUT_MOCK_RC=1' >/dev/null
+
+    local dir
+    dir=$(bundle_dir)
+    assert_contains "$(cat "${dir}network.txt")" "blocked" \
+        "closed SMTP egress (common on cloud hosts) must be reported"
+}
+
+test_diagnose_report_includes_operational_sections() {
+    local output
+    output=$(sandbox_run "diagnose")
+
+    assert_contains "$output" "Job queue" "the paste report must include queue health"
+    assert_contains "$output" "Backups" "the paste report must include backup freshness"
+    assert_contains "$output" "Outbound network" "the paste report must include network checks"
+    assert_contains "$output" "Cron" "the paste report must include cron liveness"
+}
+
 test_diagnose_survives_every_collector_failing() {
     # A diagnose that dies mid-collection is worse than useless — it must
     # produce whatever bundle it can and still exit 0.
@@ -383,6 +543,18 @@ run_diagnose_tests() {
     run_test "test_diagnose_records_ssl_certificate_status" test_diagnose_records_ssl_certificate_status
     run_test "test_diagnose_records_versions_and_container_state" test_diagnose_records_versions_and_container_state
     run_test "test_diagnose_report_includes_new_sections" test_diagnose_report_includes_new_sections
+    run_test "test_diagnose_records_queue_health_and_warns_on_failed_jobs" test_diagnose_records_queue_health_and_warns_on_failed_jobs
+    run_test "test_diagnose_records_database_health" test_diagnose_records_database_health
+    run_test "test_diagnose_warns_on_pending_migrations" test_diagnose_warns_on_pending_migrations
+    run_test "test_diagnose_reports_fresh_backup_as_ok" test_diagnose_reports_fresh_backup_as_ok
+    run_test "test_diagnose_warns_when_no_backups_exist" test_diagnose_warns_when_no_backups_exist
+    run_test "test_diagnose_attributes_disk_usage" test_diagnose_attributes_disk_usage
+    run_test "test_diagnose_records_timeline" test_diagnose_records_timeline
+    run_test "test_diagnose_cron_liveness" test_diagnose_cron_liveness
+    run_test "test_diagnose_filters_job_and_postgres_errors" test_diagnose_filters_job_and_postgres_errors
+    run_test "test_diagnose_checks_outbound_network" test_diagnose_checks_outbound_network
+    run_test "test_diagnose_reports_blocked_smtp_egress" test_diagnose_reports_blocked_smtp_egress
+    run_test "test_diagnose_report_includes_operational_sections" test_diagnose_report_includes_operational_sections
     run_test "test_diagnose_survives_every_collector_failing" test_diagnose_survives_every_collector_failing
 
     local result
