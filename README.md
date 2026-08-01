@@ -65,10 +65,11 @@ If your installation is misbehaving (site down, errors, slow responses), run:
 cd /opt/broadcast && ./broadcast.sh diagnose
 ```
 
-This collects container logs, system state, and health probes into a single
-tarball under `/opt/broadcast/logs/` and prints a summary of what it found.
-Attach the tarball to your support email. Run it **before** restarting
-anything — restarting destroys the container logs that explain what happened.
+This checks each layer of your installation, prints a report you can copy
+straight into a support email, and saves a tarball with the full container
+logs under `/opt/broadcast/logs/` in case support needs more detail. Run it
+**before** restarting anything — restarting destroys the container logs
+that explain what happened.
 
 ## License
 

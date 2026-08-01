@@ -65,8 +65,13 @@ function diagnose() {
   # 6. Interpretation: name the layer that failed, and preserve the
   # capture-before-restart discipline in the advice itself
   {
-    if [ "$puma_code" = "200" ] && [ "$thruster_code" = "200" ]; then
+    # Thruster 301 on plain HTTP is its normal redirect to HTTPS — proof it
+    # is alive, not a failure (confirmed against a healthy real install).
+    if [ "$puma_code" = "200" ] && { [ "$thruster_code" = "200" ] || [ "$thruster_code" = "301" ]; }; then
       echo "All layers healthy: Puma answers directly and Thruster serves it."
+      if [ "$thruster_code" = "301" ]; then
+        echo "(Thruster answered plain HTTP with its normal 301 redirect to HTTPS.)"
+      fi
     elif [ "$puma_code" != "200" ] && [ "$thruster_code" != "000" ]; then
       echo "WARNING: Thruster is up but the app process (Puma) is not responding."
       echo "This is the app-down fingerprint: docker ps shows the container Up,"
@@ -86,10 +91,35 @@ function diagnose() {
   tar -czf "$logs_root/diagnose-$timestamp.tar.gz" -C "$logs_root" "diagnose-$timestamp" \
     || echo -e "\e[31mCould not create the bundle tarball; the directory remains at $bundle\e[0m"
 
+  # 8. Copy-paste report: customers paste far more reliably than they
+  # attach files, so the common case must travel in the terminal output
+  # itself. The tarball stays as the escalation path (full logs are tens of
+  # thousands of lines — they cannot ride in a paste).
+  echo
+  echo "=============== COPY FROM HERE FOR YOUR SUPPORT EMAIL ==============="
+  echo "--- Summary ---"
+  cat "$bundle/summary.txt" 2>/dev/null || true
+  echo
+  echo "--- Health probes ---"
+  cat "$bundle/probes.txt" 2>/dev/null || true
+  echo
+  echo "--- Containers ---"
+  cat "$bundle/docker-ps.txt" 2>/dev/null || true
+  echo
+  echo "--- System (disk / memory / load) ---"
+  cat "$bundle/system.txt" 2>/dev/null || true
+  echo
+  echo "--- Kernel OOM check ---"
+  head -20 "$bundle/oom.txt" 2>/dev/null || true
+  echo
+  echo "--- App log (last 40 lines, Thruster access noise filtered) ---"
+  tail -40 "$bundle/app-filtered.log" 2>/dev/null || true
+  echo "================ COPY TO HERE ================"
+
   echo
   echo -e "\e[32mDiagnostic bundle ready:\e[0m"
-  echo "  Directory: $bundle"
-  echo "  Tarball:   $logs_root/diagnose-$timestamp.tar.gz (attach this to your support email)"
+  echo "  Copy the report above into your support email."
+  echo "  If support asks for full logs, attach: $logs_root/diagnose-$timestamp.tar.gz"
 
   return 0
 }

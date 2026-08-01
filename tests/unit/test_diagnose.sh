@@ -151,6 +151,39 @@ export CURL_MOCK_HTTP_CODE=200' >/dev/null
         "all-200 probes should be summarized as healthy"
 }
 
+test_diagnose_treats_thruster_301_redirect_as_healthy() {
+    # On a healthy install, plain-HTTP /up gets Thruster's 301 redirect to
+    # HTTPS — proof Thruster is alive, not a failure (TROUBLESHOOT.md,
+    # confirmed on a real installation 2026-08-01). Puma 200 + Thruster 301
+    # must read as healthy, not "Thruster HTTP probe failed".
+    sandbox_run "diagnose" 'export DIAGNOSE_PUMA_CODE=200
+export CURL_MOCK_HTTP_CODE=301' >/dev/null
+
+    local dir summary
+    dir=$(bundle_dir)
+    summary=$(cat "${dir}summary.txt")
+    assert_contains "$summary" "healthy" \
+        "Puma 200 + Thruster 301 is a healthy system"
+    if [[ "$summary" == *"probe failed"* ]]; then
+        assert_equals "healthy verdict" "false alarm" \
+            "a 301 redirect must not be reported as a failed probe"
+    fi
+}
+
+test_diagnose_prints_copy_paste_report() {
+    # Customers paste better than they attach (TROUBLESHOOT.md friction 6):
+    # stdout must end with a clearly delimited report — summary, probes,
+    # container/system state, and the filtered log tail — that a customer
+    # can copy into a support email without touching the tarball.
+    local output
+    output=$(sandbox_run "diagnose")
+
+    assert_contains "$output" "COPY" "the report must be visibly delimited for copying"
+    assert_contains "$output" "Puma direct" "the report must include the probe results"
+    assert_contains "$output" "Puma caught this error" \
+        "the report must include the filtered app log so crashes travel in the paste"
+}
+
 test_diagnose_includes_oom_check_and_system_state() {
     sandbox_run "diagnose" 'export JOURNALCTL_MOCK="kernel: Out of memory: Killed process 1234 (ruby)"' >/dev/null
 
@@ -198,6 +231,8 @@ run_diagnose_tests() {
     run_test "test_diagnose_records_layered_probes" test_diagnose_records_layered_probes
     run_test "test_diagnose_flags_thruster_up_puma_down_fingerprint" test_diagnose_flags_thruster_up_puma_down_fingerprint
     run_test "test_diagnose_reports_healthy_when_all_probes_pass" test_diagnose_reports_healthy_when_all_probes_pass
+    run_test "test_diagnose_treats_thruster_301_redirect_as_healthy" test_diagnose_treats_thruster_301_redirect_as_healthy
+    run_test "test_diagnose_prints_copy_paste_report" test_diagnose_prints_copy_paste_report
     run_test "test_diagnose_includes_oom_check_and_system_state" test_diagnose_includes_oom_check_and_system_state
     run_test "test_diagnose_survives_every_collector_failing" test_diagnose_survives_every_collector_failing
 
