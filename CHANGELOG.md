@@ -11,6 +11,7 @@ release cadence begins, dated version sections will be promoted from this list.
 ## [Unreleased]
 
 ### Added
+- README now documents every `./broadcast.sh` command with what it does and when to use it, grouped by service management, install/update, backup/restore, diagnostics, and configuration.
 - `./broadcast.sh diagnose` collects a one-shot support bundle: full container logs (captured first, since a restart destroys them), a noise-filtered app log that surfaces Puma crashes, docker/system state, a kernel OOM check, and layered health probes (Puma direct, Thruster HTTP, HTTPS origin via `--resolve`) with an interpretation summary that flags the "container Up but app dead" fingerprint. Produces a tarball to attach to a support email, collapsing multi-email diagnostic round-trips into one command.
 - Backups now write a `.sha256` checksum sidecar next to the tarball, and `./broadcast.sh restore` verifies it before touching the system — a backup corrupted in transit (offsite download, copy between hosts) is refused before services are stopped. Backups without a sidecar restore as before.
 
