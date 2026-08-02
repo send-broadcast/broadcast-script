@@ -3,7 +3,15 @@
 # to sendbroadcast.net so the dashboard can show health and alert the owner
 # (the down system is an email platform — it cannot email about itself).
 #
-# Fleet-safety rules, each deliberate:
+# TRANSMISSION is opt-in, not just storage:
+#   - Until the server has confirmed monitoring is enabled, the install
+#     sends only a key+domain handshake (no status, no probes, no system
+#     facts), at most once per hour, to learn whether it was turned on.
+#   - A /opt/broadcast/.no_health_reports flag file silences the sender
+#     entirely — a verifiable zero-phone-home switch, managed with
+#     ./broadcast.sh monitor-enable / monitor-disable.
+#
+# Fleet-safety rules once enabled, each deliberate:
 #   - Hysteresis: 3 consecutive failed probes before declaring unhealthy,
 #     so a deploy blip or restart never pages anyone.
 #   - Transitions send immediately; steady state sends only a heartbeat
@@ -14,19 +22,39 @@
 #   - Backoff: failed sends drop the report (lossy by design — a queued
 #     backlog would spike the server on recovery) and back off
 #     exponentially. Transitions bypass backoff; they are rare.
-#   - A "monitoring disabled" response silences everything for an hour —
-#     opt-out is respected with at most one probe-shaped request per hour.
-#   - Payload is status codes and basic system facts only; the server
-#     additionally enforces this whitelist on its side.
+#   - A "monitoring disabled" response returns the install to handshake
+#     mode, silent for an hour.
 
 HEALTH_REPORT_URL_DEFAULT="https://sendbroadcast.net/health/report"
 HEALTH_FAILURE_THRESHOLD=3
 HEALTH_DISABLED_RECHECK_SECONDS=3600
 HEALTH_BACKOFF_CAP_SECONDS=3600
 
+# Writes the state file atomically. Reads health()'s locals via bash's
+# dynamic scoping — only ever called from inside health().
+function _health_write_state() {
+  cat > "$state_file.tmp" <<STATE
+last_status=$last_status
+consecutive_failures=$consecutive_failures
+last_heartbeat=$last_heartbeat
+heartbeat_interval=$heartbeat_interval
+disabled_until=$disabled_until
+backoff_until=$backoff_until
+send_failures=$send_failures
+server_enabled=$server_enabled
+STATE
+  mv "$state_file.tmp" "$state_file"
+}
+
 function health() {
   local state_file="/opt/broadcast/.health_state"
   local url="${BROADCAST_HEALTH_URL:-$HEALTH_REPORT_URL_DEFAULT}"
+
+  # Hard opt-out: nothing leaves this server, ever
+  if [ -f /opt/broadcast/.no_health_reports ]; then
+    return 0
+  fi
+
   local now
   now=$(date +%s)
 
@@ -41,9 +69,43 @@ function health() {
   # --- Load persisted state (our own root-owned key=value file) ----------
   local last_status="" consecutive_failures=0 last_heartbeat=0
   local heartbeat_interval=300 disabled_until=0 backoff_until=0 send_failures=0
+  local server_enabled=0
   if [ -f "$state_file" ]; then
     # shellcheck disable=SC1090
     source "$state_file" || true
+  fi
+
+  # Migration: installs that were already reporting before handshake mode
+  # existed have a last_status but no server_enabled marker — they are
+  # enabled by definition and must not regress into handshake mode.
+  if [ "$server_enabled" != "1" ] && [ -n "$last_status" ]; then
+    server_enabled=1
+  fi
+
+  # --- Handshake mode: opt-in not yet confirmed --------------------------
+  # Send ONLY key+domain (no health data), at most hourly, until the
+  # server says monitoring is enabled.
+  if [ "$server_enabled" != "1" ]; then
+    if [ "$now" -ge "$disabled_until" ]; then
+      local response="" send_rc=0
+      response=$(curl -s -m 15 -X POST \
+        --data-urlencode "key=$key" \
+        --data-urlencode "domain=$domain" \
+        "$url" 2>/dev/null) || send_rc=$?
+
+      if [ "$send_rc" -eq 0 ] && echo "$response" | grep -q '"monitoring":"enabled"'; then
+        server_enabled=1
+        disabled_until=0
+        local server_interval
+        server_interval=$(echo "$response" | grep -o '"heartbeat_interval":[0-9]*' | grep -o '[0-9]*$') || server_interval=""
+        [ -n "$server_interval" ] && heartbeat_interval="$server_interval"
+        echo "[$(date)] health: monitoring is enabled; reports start on the next run"
+      else
+        disabled_until=$((now + HEALTH_DISABLED_RECHECK_SECONDS))
+      fi
+    fi
+    _health_write_state
+    return 0
   fi
 
   # --- Probe each layer ---------------------------------------------------
@@ -80,10 +142,8 @@ function health() {
     fi
   fi
 
-  # Opt-out silence and failure backoff (transitions bypass backoff only)
-  if [ "$now" -lt "$disabled_until" ]; then
-    send=false
-  elif [ "$now" -lt "$backoff_until" ] && [ "$transition" != true ]; then
+  # Failure backoff (transitions bypass it; they are rare)
+  if [ "$now" -lt "$backoff_until" ] && [ "$transition" != true ]; then
     send=false
   fi
 
@@ -129,6 +189,10 @@ function health() {
       last_heartbeat=$now
       last_status="$current"
       if echo "$response" | grep -q '"monitoring":"disabled"'; then
+        # Monitoring was turned off in the dashboard: back to handshake
+        # mode, silent for an hour, and drop the reporting state
+        server_enabled=0
+        last_status=""
         disabled_until=$((now + HEALTH_DISABLED_RECHECK_SECONDS))
         echo "[$(date)] health: monitoring is disabled for this server; next check-in in an hour"
       else
@@ -149,17 +213,36 @@ function health() {
     fi
   fi
 
-  # --- Persist state atomically ------------------------------------------
-  cat > "$state_file.tmp" <<STATE
-last_status=$last_status
-consecutive_failures=$consecutive_failures
-last_heartbeat=$last_heartbeat
-heartbeat_interval=$heartbeat_interval
-disabled_until=$disabled_until
-backoff_until=$backoff_until
-send_failures=$send_failures
-STATE
-  mv "$state_file.tmp" "$state_file"
-
+  _health_write_state
   return 0
+}
+
+# Silence the health reporter completely: with the flag file in place, the
+# cron run exits before contacting anything — a switch strict self-hosters
+# can verify themselves.
+function monitor_disable() {
+  touch /opt/broadcast/.no_health_reports
+  echo -e "\e[32mHealth reporting disabled.\e[0m"
+  echo "This server will not send any health data to sendbroadcast.net — not even"
+  echo "the hourly is-monitoring-on check-in."
+  echo
+  echo "Re-enable any time with: ./broadcast.sh monitor-enable"
+}
+
+# Re-enable reporting: clear the flag and any silence/backoff windows, then
+# check in immediately instead of waiting for the next hourly window.
+function monitor_enable() {
+  rm -f /opt/broadcast/.no_health_reports
+
+  if [ -f /opt/broadcast/.health_state ]; then
+    sed -i.bak -e 's/^disabled_until=.*/disabled_until=0/' \
+               -e 's/^backoff_until=.*/backoff_until=0/' /opt/broadcast/.health_state \
+      && rm -f /opt/broadcast/.health_state.bak
+  fi
+
+  echo -e "\e[32mHealth reporting enabled on this server; checking in now...\e[0m"
+  health
+  echo
+  echo -e "\e[33mReminder: to receive alerts, monitoring must also be enabled for this\e[0m"
+  echo -e "\e[33mserver on the Servers page of your sendbroadcast.net dashboard.\e[0m"
 }

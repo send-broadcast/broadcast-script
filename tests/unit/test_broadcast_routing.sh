@@ -139,6 +139,17 @@ main install")
         ".current_version should be set before install runs"
 }
 
+test_monitor_toggle_commands_route_to_their_functions() {
+    local output
+    output=$(sandbox_run "$GUARD_STUBS
+monitor_enable() { echo ROUTED_monitor_enable; }
+monitor_disable() { echo ROUTED_monitor_disable; }
+main monitor-enable; main monitor-disable")
+
+    assert_contains "$output" "ROUTED_monitor_enable" "'monitor-enable' should route"
+    assert_contains "$output" "ROUTED_monitor_disable" "'monitor-disable' should route"
+}
+
 test_simple_commands_route_to_their_functions() {
     local output
     output=$(sandbox_run "$GUARD_STUBS
@@ -178,6 +189,7 @@ run_broadcast_routing_tests() {
     run_test "test_restore_forwards_file_and_confirmation_flag" test_restore_forwards_file_and_confirmation_flag
     run_test "test_restore_without_file_reaches_real_validation" test_restore_without_file_reaches_real_validation
     run_test "test_install_pins_image_to_latest_before_installing" test_install_pins_image_to_latest_before_installing
+    run_test "test_monitor_toggle_commands_route_to_their_functions" test_monitor_toggle_commands_route_to_their_functions
     run_test "test_simple_commands_route_to_their_functions" test_simple_commands_route_to_their_functions
 
     local result
