@@ -38,4 +38,16 @@ EOF
 
     # Write JSON to file as broadcast user
     su - broadcast -c "echo '$json_output' > /opt/broadcast/app/monitor/system.json"
+
+    # Cron runs stay silent (their stdout is a log file appended every
+    # minute); a person at a terminal gets confirmation of what was written.
+    if monitor_output_is_terminal; then
+        echo "Wrote host metrics to /opt/broadcast/app/monitor/system.json:"
+        echo "$json_output"
+    fi
+}
+
+# Seam for tests; true when a person is watching (stdout is a terminal)
+monitor_output_is_terminal() {
+    [ -t 1 ]
 }

@@ -83,6 +83,29 @@ test_monitor_writes_as_broadcast_user() {
         "the JSON write must go through the broadcast user"
 }
 
+test_monitor_prints_metrics_when_run_interactively() {
+    # Manual runs should confirm what was written; the terminal check is
+    # behind monitor_output_is_terminal so it can be forced here.
+    echo "2.1.0" > "$SANDBOX_ROOT/.current_version"
+    local output
+    output=$(sandbox_run 'monitor_output_is_terminal() { return 0; }
+monitor')
+
+    assert_contains "$output" "system.json" "interactive runs should name the output file"
+    assert_contains "$output" "cpu_cores" "interactive runs should show the metrics written"
+}
+
+test_monitor_stays_silent_for_cron() {
+    # Cron runs every minute with stdout appended to a log file — success
+    # must produce no output there.
+    echo "2.1.0" > "$SANDBOX_ROOT/.current_version"
+    local output
+    output=$(sandbox_run 'monitor_output_is_terminal() { return 1; }
+monitor')
+
+    assert_equals "" "$output" "non-interactive runs must stay silent"
+}
+
 run_monitor_tests() {
     echo "Running Monitor Function Tests"
     echo "=============================="
@@ -96,6 +119,8 @@ run_monitor_tests() {
     run_test "test_monitor_reports_expected_metrics" test_monitor_reports_expected_metrics
     run_test "test_monitor_reports_unknown_version_without_version_file" test_monitor_reports_unknown_version_without_version_file
     run_test "test_monitor_writes_as_broadcast_user" test_monitor_writes_as_broadcast_user
+    run_test "test_monitor_prints_metrics_when_run_interactively" test_monitor_prints_metrics_when_run_interactively
+    run_test "test_monitor_stays_silent_for_cron" test_monitor_stays_silent_for_cron
 
     local result
     print_test_summary
