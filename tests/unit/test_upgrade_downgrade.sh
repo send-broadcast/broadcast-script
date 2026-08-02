@@ -16,6 +16,14 @@ setup_sandbox() {
     harness_make_sandbox
     echo "2.0.0" > "$SANDBOX_ROOT/.current_version"
     touch "$SANDBOX_ROOT/app/.env"
+
+    # crontab: -l prints the stored crontab, - installs from stdin (buffered
+    # through a temp file to avoid racing the -l in the same pipeline)
+    harness_mock crontab 'case "${1:-}" in
+  -l) cat "$BROADCAST_ROOT/crontab.txt" 2>/dev/null || exit 1 ;;
+  -) cat > "$BROADCAST_ROOT/crontab.txt.tmp" && mv "$BROADCAST_ROOT/crontab.txt.tmp" "$BROADCAST_ROOT/crontab.txt" ;;
+esac
+exit 0'
 }
 
 teardown_sandbox() {
@@ -148,6 +156,24 @@ ENV
         "existing key values must survive an upgrade untouched"
 }
 
+test_upgrade_continue_adds_health_cron_for_older_installs() {
+    # Existing installs pull new script FILES via the daily update, but
+    # nothing adds new cron ENTRIES on their machines — the upgrade path
+    # must backfill the health-reporting cron (same pattern as the
+    # logs-watcher install for upgrades from older versions).
+    echo "* * * * * $SANDBOX_ROOT/broadcast.sh monitor" > "$SANDBOX_ROOT/crontab.txt"
+
+    sandbox_run "_upgrade_continue 2.5.0" >/dev/null
+    sandbox_run "_upgrade_continue 2.5.0" >/dev/null
+
+    local count
+    count=$(/usr/bin/grep -c "broadcast.sh health" "$SANDBOX_ROOT/crontab.txt")
+    assert_equals "1" "$count" \
+        "the health cron entry must be added exactly once across upgrades"
+    assert_contains "$(cat "$SANDBOX_ROOT/crontab.txt")" "broadcast.sh monitor" \
+        "existing cron entries must survive"
+}
+
 # --- _downgrade_continue --------------------------------------------------
 
 test_downgrade_continue_full_sequence() {
@@ -188,6 +214,7 @@ run_upgrade_downgrade_tests() {
     run_test "test_upgrade_continue_restarts_logs_watcher_to_pick_up_new_scripts" test_upgrade_continue_restarts_logs_watcher_to_pick_up_new_scripts
     run_test "test_upgrade_continue_adds_encryption_keys_when_missing" test_upgrade_continue_adds_encryption_keys_when_missing
     run_test "test_upgrade_continue_preserves_existing_encryption_keys" test_upgrade_continue_preserves_existing_encryption_keys
+    run_test "test_upgrade_continue_adds_health_cron_for_older_installs" test_upgrade_continue_adds_health_cron_for_older_installs
     run_test "test_downgrade_continue_full_sequence" test_downgrade_continue_full_sequence
 
     local result

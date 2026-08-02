@@ -58,6 +58,14 @@ function _upgrade_continue() {
   echo -e "\e[33mRestarting log streaming trigger watcher to pick up updated scripts...\e[0m"
   systemctl restart broadcast-logs-watcher || true
 
+  # Add the health-reporting cron entry if missing (for upgrades from older
+  # versions — existing installs pull new script files via the daily update,
+  # but only the upgrade path can add new cron entries on their machines)
+  if ! crontab -l 2>/dev/null | grep -q "broadcast.sh health"; then
+    echo -e "\e[33mAdding health reporting cron entry...\e[0m"
+    (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh health >> /opt/broadcast/logs/cron/health.log 2>&1") | crontab -
+  fi
+
   # Add Active Record encryption keys if missing (required for encrypted fields like API keys)
   if ! grep -q "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY" /opt/broadcast/app/.env 2>/dev/null; then
     echo -e "\e[33mAdding Active Record encryption keys...\e[0m"
