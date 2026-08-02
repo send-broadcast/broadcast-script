@@ -31,7 +31,7 @@ SANDBOX_CALLS=""
 
 # Scripts loaded into every sandbox, in source order (common first; restore
 # defines compare_versions used by others).
-HARNESS_SCRIPTS="common.sh restore.sh backup.sh update.sh upgrade.sh downgrade.sh trigger.sh monitor.sh diagnose.sh fix.sh init-services.sh"
+HARNESS_SCRIPTS="common.sh restore.sh backup.sh update.sh upgrade.sh downgrade.sh trigger.sh monitor.sh diagnose.sh fix.sh health.sh init-services.sh"
 
 harness_make_sandbox() {
     SANDBOX_ROOT=$(mktemp -d)
@@ -44,7 +44,8 @@ harness_make_sandbox() {
         "$SANDBOX_ROOT/db/backups" "$SANDBOX_ROOT/db/init-scripts" \
         "$SANDBOX_ROOT/logs/cron" "$SANDBOX_ROOT/ssl" \
         "$SANDBOX_ROOT/etc/systemd/system" "$SANDBOX_ROOT/etc/sudoers.d" \
-        "$SANDBOX_ROOT/etc/logrotate.d" "$SANDBOX_ROOT/home/broadcast"
+        "$SANDBOX_ROOT/etc/logrotate.d" "$SANDBOX_ROOT/home/broadcast" \
+        "$SANDBOX_ROOT/var/run"
 
     # Rewrite ONLY the hardcoded path constants; everything else is the
     # original script text.
@@ -55,6 +56,7 @@ harness_make_sandbox() {
             -e "s|/etc/sudoers.d|$SANDBOX_ROOT/etc/sudoers.d|g" \
             -e "s|/etc/logrotate.d|$SANDBOX_ROOT/etc/logrotate.d|g" \
             -e "s|/home/broadcast|$SANDBOX_ROOT/home/broadcast|g" \
+            -e "s|/var/run|$SANDBOX_ROOT/var/run|g" \
             "$HARNESS_PROJECT_ROOT/scripts/$s" > "$SANDBOX_ROOT/scripts/$s"
     done
 

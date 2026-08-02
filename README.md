@@ -49,6 +49,7 @@ cd /opt/broadcast && ./broadcast.sh <command>
 - **`diagnose`** — Collect a support bundle: container logs, system state, and layered health checks, packed into a tarball you can attach to a support email. See Troubleshooting below.
 - **`fix`** — Repair installation drift: recreates missing directories, restores permissions and ownership, reinstalls and starts missing services, re-adds missing cron entries, and generates missing encryption keys. Safe to run at any time; it only changes what is actually wrong and reports each check as `ok:` or `fixed:`.
 - **`monitor`** — Report host metrics (CPU, memory, disk) to the Broadcast dashboard. Runs automatically every minute via cron; you should not need to run it by hand.
+- **`health`** — Report server health to your sendbroadcast.net dashboard, if you have enabled monitoring for this server there. Sends only health status codes and basic system facts (disk, memory, version, whether a restart is pending) — never logs, configuration, or subscriber data. Runs automatically every minute via cron; when monitoring is not enabled, it stays quiet apart from an hourly check-in to see if it has been turned on.
 - **`trigger`** — Check for and execute actions requested from the Broadcast web interface (upgrades, backups, domain changes). Also runs automatically every minute via cron.
 
 ### Configuration

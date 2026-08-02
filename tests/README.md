@@ -136,6 +136,14 @@ Test the real functions from the management scripts in isolation.
   password mismatch), failed repairs are survived through to an honest
   summary, and a healthy system reports all-ok with nothing repaired
 
+**test_health_sender.sh** (real `health.sh`):
+- Fleet-safe health reporting: first-report and system-fact payloads,
+  reboot-required detection, heartbeat-interval quiet periods with
+  server-steered cadence, 3-strike hysteresis before unhealthy,
+  immediate transition/recovery sends, no re-spam in steady state,
+  disabled-response silence, exponential backoff on send failure, and
+  endpoint override via BROADCAST_HEALTH_URL
+
 ### Integration Tests (`tests/integration/`)
 
 Test complete workflows through the real scripts.

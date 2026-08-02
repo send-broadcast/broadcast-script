@@ -288,7 +288,7 @@ LOGROTATE
 
   # --- Cron entries (append only what is missing; never rewrite) --------
   local cron_cmd cron_line
-  for cron_cmd in "monitor:* * * * *" "trigger:* * * * *" "update:0 0 * * *"; do
+  for cron_cmd in "monitor:* * * * *" "trigger:* * * * *" "health:* * * * *" "update:0 0 * * *"; do
     local name="${cron_cmd%%:*}"
     local schedule="${cron_cmd#*:}"
     if crontab -l 2>/dev/null | grep -q "broadcast.sh $name"; then
