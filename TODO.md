@@ -1,5 +1,35 @@
 # TODO
 
+## Server health monitoring (SHIPPED 2026-08-02, live in production)
+
+End-to-end opt-in monitoring: `broadcast.sh health` (per-minute cron;
+hysteresis, jittered server-steered heartbeats, lossy backoff) reports to
+sendbroadcast.net, which stores whitelisted status/system facts, shows
+them on the dashboard Servers page (friendly detail view, progressive
+disclosure), and emails the owner on down/stale/recovery transitions —
+from infrastructure that is not the down email platform itself.
+
+Live-fire verified on broadcast.furvur.com (2026-08-02): container
+stopped 13:38:52 UTC → two silent probe failures (hysteresis) →
+unhealthy sent 13:41:01 (+ down-alert email) → restarted 13:41:22 →
+healthy sent 13:42:01 (+ recovery email). Detection-to-alert ~2 minutes,
+vs the 2-day silent outage that motivated the feature.
+
+Carried to a future sprint:
+- [ ] Auto-remediation tier (second opt-in beyond alerting): host
+      supervisor restarts the app container on unhealthy, with
+      evidence capture BEFORE restart and a restart budget
+      (3/hour → stop and escalate). Design settled in the supervision
+      debate: external actor, never container self-monitoring.
+- [ ] Log persistence across `compose down` (postmortem friction 9a);
+      journald forwarding is the preferred shape.
+- [ ] Rails-repo items: procps in the image (friction 9), entrypoint
+      exits when Puma dies (cheap exit-based layer; wedges stay with
+      the external supervisor).
+- [ ] README: list Ubuntu 26.04 as supported (smoke-validated).
+- [ ] Dashboard data hygiene: duplicate broadcast.furvur.com
+      registration (two licenses; only one can ever report).
+
 ## Support tooling (from broadcast/TROUBLESHOOT.md, firstborngroup 520 case)
 
 Source: 2-day outage where Puma died inside the app container while Thruster
