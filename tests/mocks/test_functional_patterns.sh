@@ -52,6 +52,52 @@ export CURL_MOCK_BODY='$VALID_LICENSE_RESPONSE'") || rc=$?
         "validation must target the license API over HTTPS"
 }
 
+RICH_LICENSE_RESPONSE='{"registry_url":"gitea.hostedapp.org","registry_login":"broadcast-user","registry_password":"s3cret","license_name":"Test Extended License","license_status":"active","license_key_masked":"••••••••3F2A","buyer_name":"Simon Chiu","buyer_email":"s•••@furvur.com","servers_total":5,"servers_used":2,"domains":["test.example.com","demo.other.com"],"monitoring_enabled":true,"latest_version":"2.23.0"}'
+
+test_validate_license_prints_the_operator_summary() {
+    echo "2.23.0" > "$SANDBOX_ROOT/.current_version"
+
+    local output rc=0
+    output=$(sandbox_run "validate_license" "
+export CURL_MOCK_HTTP_CODE=200
+export CURL_MOCK_BODY='$RICH_LICENSE_RESPONSE'") || rc=$?
+
+    assert_equals "0" "$rc" "an enriched response should validate"
+    assert_contains "$output" "Test Extended License" "the license name must be shown"
+    assert_contains "$output" "active" "the license status must be shown"
+    assert_contains "$output" "Simon Chiu" "the buyer must be shown"
+    assert_contains "$output" "s•••@furvur.com" "the masked buyer email must be shown"
+    assert_contains "$output" "••••••••3F2A" "the masked key must be shown"
+    assert_contains "$output" "2 of 5" "server usage must be shown"
+    assert_contains "$output" "demo.other.com" "other registered domains must be listed"
+    assert_contains "$output" "up to date" "matching versions must be reported as current"
+    assert_contains "$output" "enabled for this server" "the monitoring state must be shown"
+}
+
+test_validate_license_flags_an_available_update() {
+    echo "2.20.0" > "$SANDBOX_ROOT/.current_version"
+
+    local output
+    output=$(sandbox_run "validate_license" "
+export CURL_MOCK_HTTP_CODE=200
+export CURL_MOCK_BODY='$RICH_LICENSE_RESPONSE'")
+
+    assert_contains "$output" "update available: 2.23.0" \
+        "a newer release must be surfaced with the installed version"
+    assert_contains "$output" "upgrade" "the fix should be named"
+}
+
+test_validate_license_notes_disabled_monitoring() {
+    local body="${RICH_LICENSE_RESPONSE/\"monitoring_enabled\":true/\"monitoring_enabled\":false}"
+    local output
+    output=$(sandbox_run "validate_license" "
+export CURL_MOCK_HTTP_CODE=200
+export CURL_MOCK_BODY='$body'")
+
+    assert_contains "$output" "disabled" "disabled monitoring must be shown"
+    assert_contains "$output" "dashboard" "the way to enable it should be pointed at"
+}
+
 test_validate_license_rejects_401_as_invalid_key() {
     local rc=0 output
     output=$(sandbox_run "validate_license" "
@@ -149,6 +195,9 @@ run_functional_tests() {
     TEST_TEARDOWN_FUNCTION="teardown_sandbox"
 
     run_test "test_validate_license_success_writes_registry_credentials" test_validate_license_success_writes_registry_credentials
+    run_test "test_validate_license_prints_the_operator_summary" test_validate_license_prints_the_operator_summary
+    run_test "test_validate_license_flags_an_available_update" test_validate_license_flags_an_available_update
+    run_test "test_validate_license_notes_disabled_monitoring" test_validate_license_notes_disabled_monitoring
     run_test "test_validate_license_rejects_401_as_invalid_key" test_validate_license_rejects_401_as_invalid_key
     run_test "test_validate_license_rejects_unexpected_http_status" test_validate_license_rejects_unexpected_http_status
     run_test "test_validate_license_rejects_malformed_json" test_validate_license_rejects_malformed_json

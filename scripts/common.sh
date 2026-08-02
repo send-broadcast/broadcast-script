@@ -164,7 +164,65 @@ validate_license() {
   echo "BROADCAST_REGISTRY_LOGIN=$registry_login" >> /opt/broadcast/.env
   echo "BROADCAST_REGISTRY_PASSWORD=$registry_password" >> /opt/broadcast/.env
 
+  print_license_summary "$response" "$domain"
+
   return 0
+}
+
+# Operator summary from the enriched /license/check response. Every field
+# is optional — older server responses simply skip the summary, so this
+# degrades cleanly during rollout. Sensitive values arrive pre-masked.
+print_license_summary() {
+  local response="$1"
+  local this_domain="$2"
+
+  local license_name
+  license_name=$(echo "$response" | jq -r '.license_name // empty')
+  [ -z "$license_name" ] && return 0
+
+  local license_status key_masked buyer_name buyer_email servers_total servers_used
+  local monitoring latest_version other_domains installed_version
+  license_status=$(echo "$response" | jq -r '.license_status // empty')
+  key_masked=$(echo "$response" | jq -r '.license_key_masked // empty')
+  buyer_name=$(echo "$response" | jq -r '.buyer_name // empty')
+  buyer_email=$(echo "$response" | jq -r '.buyer_email // empty')
+  servers_total=$(echo "$response" | jq -r '.servers_total // empty')
+  servers_used=$(echo "$response" | jq -r '.servers_used // empty')
+  # tostring, not '// empty': a false value must survive (false // empty
+  # yields empty in jq, which would silently drop the disabled state)
+  monitoring=$(echo "$response" | jq -r '.monitoring_enabled | tostring')
+  latest_version=$(echo "$response" | jq -r '.latest_version // empty')
+  other_domains=$(echo "$response" | jq -r '.domains[]? // empty' | grep -vx "$this_domain" | paste -sd ', ' -)
+
+  echo
+  echo -e "\e[1mLicense details\e[0m"
+  echo "  License:     $license_name${license_status:+ ($license_status)}"
+  if [ -n "$buyer_name" ]; then
+    echo "  Buyer:       $buyer_name${buyer_email:+ <$buyer_email>}"
+  fi
+  [ -n "$key_masked" ] && echo "  Key:         $key_masked"
+  if [ -n "$servers_total" ] && [ -n "$servers_used" ]; then
+    echo "  Servers:     $servers_used of $servers_total used"
+  fi
+  echo "  This server: $this_domain (registered)"
+  [ -n "$other_domains" ] && echo "  Also registered: $other_domains"
+
+  if [ -n "$latest_version" ]; then
+    installed_version=$(cat /opt/broadcast/.current_version 2>/dev/null || echo "")
+    if [ "$installed_version" = "$latest_version" ]; then
+      echo "  Version:     $installed_version — up to date"
+    elif [ -n "$installed_version" ]; then
+      echo -e "  Version:     $installed_version — \e[33mupdate available: $latest_version\e[0m (./broadcast.sh upgrade)"
+    else
+      echo "  Version:     latest release is $latest_version"
+    fi
+  fi
+
+  case "$monitoring" in
+    true)  echo "  Monitoring:  enabled for this server" ;;
+    false) echo "  Monitoring:  disabled — enable it on the Servers page of your sendbroadcast.net dashboard" ;;
+  esac
+  echo
 }
 
 load_registry_info() {
