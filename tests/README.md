@@ -123,13 +123,18 @@ Test the real functions from the management scripts in isolation.
   when every collector fails
 
 **test_fix.sh** (real `fix.sh`):
-- Idempotent drift repair: missing directories/sudoers/systemd units
-  recreated, executable bits and ownership restored (and left alone when
-  correct), docker group membership repaired, services enabled/started
-  when inactive, cron entries added exactly once while preserving
-  unrelated entries, encryption keys generated when absent, unfixable
-  prerequisites (missing docker) exit 1, and a healthy system reports
-  all-ok with nothing repaired
+- Idempotent drift repair: missing directories/sudoers/systemd units/
+  logrotate recreated, executable bits (broadcast.sh and helper scripts)
+  and ownership restored (and left alone when correct), docker group
+  membership repaired, a lost .image regenerated pinned to the installed
+  version (existing pins never rewritten), registry login restored and
+  verified, services enabled/started with verify-after-action (an
+  unverifiable start is FAIL, not "fixed"), cron entries added exactly
+  once while preserving unrelated entries, app/.env essentials repaired
+  (keys, SECRET_KEY_BASE, TLS_DOMAIN, DATABASE_PASSWORD from db/.env),
+  unfixable states exit 1 (missing docker/compose, lost db/.env,
+  password mismatch), failed repairs are survived through to an honest
+  summary, and a healthy system reports all-ok with nothing repaired
 
 ### Integration Tests (`tests/integration/`)
 

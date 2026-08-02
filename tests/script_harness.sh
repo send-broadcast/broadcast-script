@@ -43,7 +43,8 @@ harness_make_sandbox() {
         "$SANDBOX_ROOT/app/monitor" "$SANDBOX_ROOT/app/uploads" \
         "$SANDBOX_ROOT/db/backups" "$SANDBOX_ROOT/db/init-scripts" \
         "$SANDBOX_ROOT/logs/cron" "$SANDBOX_ROOT/ssl" \
-        "$SANDBOX_ROOT/etc/systemd/system" "$SANDBOX_ROOT/etc/sudoers.d"
+        "$SANDBOX_ROOT/etc/systemd/system" "$SANDBOX_ROOT/etc/sudoers.d" \
+        "$SANDBOX_ROOT/etc/logrotate.d" "$SANDBOX_ROOT/home/broadcast"
 
     # Rewrite ONLY the hardcoded path constants; everything else is the
     # original script text.
@@ -52,6 +53,8 @@ harness_make_sandbox() {
         sed -e "s|/opt/broadcast|$SANDBOX_ROOT|g" \
             -e "s|/etc/systemd/system|$SANDBOX_ROOT/etc/systemd/system|g" \
             -e "s|/etc/sudoers.d|$SANDBOX_ROOT/etc/sudoers.d|g" \
+            -e "s|/etc/logrotate.d|$SANDBOX_ROOT/etc/logrotate.d|g" \
+            -e "s|/home/broadcast|$SANDBOX_ROOT/home/broadcast|g" \
             "$HARNESS_PROJECT_ROOT/scripts/$s" > "$SANDBOX_ROOT/scripts/$s"
     done
 

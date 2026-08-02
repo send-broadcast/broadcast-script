@@ -15,15 +15,43 @@ source "$SCRIPT_DIR/../script_harness.sh"
 setup_sandbox() {
     harness_make_sandbox
     echo "test.example.com" > "$SANDBOX_ROOT/.domain"
-    touch "$SANDBOX_ROOT/app/.env"
     touch "$SANDBOX_ROOT/broadcast.sh"
     chmod +x "$SANDBOX_ROOT/broadcast.sh"
 
-    # systemctl with controllable is-enabled / is-active results
+    # Healthy config baseline; individual tests delete pieces to create drift
+    cat > "$SANDBOX_ROOT/app/.env" <<'ENV'
+SECRET_KEY_BASE=abc123
+DATABASE_PASSWORD=pass123
+TLS_DOMAIN=test.example.com
+ENV
+    echo "POSTGRES_PASSWORD=pass123" > "$SANDBOX_ROOT/db/.env"
+    cat > "$SANDBOX_ROOT/.env" <<'ENV'
+BROADCAST_REGISTRY_URL=gitea.hostedapp.org
+BROADCAST_REGISTRY_LOGIN=broadcast-user
+BROADCAST_REGISTRY_PASSWORD=s3cret
+ENV
+    mkdir -p "$SANDBOX_ROOT/home/broadcast/.docker"
+    echo '{"auths":{"gitea.hostedapp.org":{}}}' > "$SANDBOX_ROOT/home/broadcast/.docker/config.json"
+    echo "2.23.0" > "$SANDBOX_ROOT/.current_version"
+    echo "DOCKER_IMAGE=gitea.hostedapp.org/broadcast/broadcast:2.23.0" > "$SANDBOX_ROOT/.image"
+    echo "/opt/broadcast/logs config" > "$SANDBOX_ROOT/etc/logrotate.d/broadcast"
+    chmod +x "$SANDBOX_ROOT/scripts/post-upgrade-cleanup.sh" \
+             "$SANDBOX_ROOT/scripts/logs-trigger-watcher.sh" 2>/dev/null || true
+
+    # systemctl: STATEFUL — enable/start leave markers that is-enabled/
+    # is-active then honor, so fix's verify-after-repair sees the effect.
+    # Env RCs give the pre-repair state.
     harness_mock systemctl 'case "${1:-}" in
-  is-enabled) exit "${SYSTEMCTL_IS_ENABLED_RC:-0}" ;;
-  is-active) exit "${SYSTEMCTL_IS_ACTIVE_RC:-0}" ;;
+  is-enabled) [ -f "$BROADCAST_ROOT/.enabled-${2:-}" ] && exit 0; exit "${SYSTEMCTL_IS_ENABLED_RC:-0}" ;;
+  is-active) [ -f "$BROADCAST_ROOT/.active-${2:-}" ] && exit 0; exit "${SYSTEMCTL_IS_ACTIVE_RC:-0}" ;;
+  enable) touch "$BROADCAST_ROOT/.enabled-${2:-}" ;;
+  start) touch "$BROADCAST_ROOT/.active-${2:-}" ;;
 esac
+exit 0'
+    # su: fix's registry-login repair runs docker login as broadcast; the
+    # mock simulates a successful login by writing the docker config
+    harness_mock su 'mkdir -p "$BROADCAST_ROOT/home/broadcast/.docker"
+echo "{\"auths\":{\"gitea.hostedapp.org\":{}}}" > "$BROADCAST_ROOT/home/broadcast/.docker/config.json"
 exit 0'
     # id: user exists; group list controllable
     harness_mock id 'if [ "${1:-}" = "-nG" ]; then echo "${ID_MOCK_GROUPS:-broadcast docker}"; fi
@@ -200,6 +228,189 @@ fix' "$FIX_ENV" >/dev/null
         "missing inotify-tools must be installed"
 }
 
+test_fix_regenerates_missing_image_file() {
+    rm -f "$SANDBOX_ROOT/.image"
+
+    local output
+    output=$(sandbox_run "fix" "$FIX_ENV")
+
+    assert_file_exists "$SANDBOX_ROOT/.image" ".image must be regenerated"
+    assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":2.23.0" \
+        ".image must be pinned to the installed version, not silently un-pinned to latest"
+    assert_contains "$output" "fixed:" "the repair must be reported"
+}
+
+test_fix_image_defaults_to_latest_without_version_file() {
+    rm -f "$SANDBOX_ROOT/.image" "$SANDBOX_ROOT/.current_version"
+
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+
+    assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":latest" \
+        "with no version record, latest is the only option"
+}
+
+test_fix_preserves_existing_image_file() {
+    echo "DOCKER_IMAGE=gitea.hostedapp.org/broadcast/broadcast-arm:2.20.0" > "$SANDBOX_ROOT/.image"
+
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+
+    assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":2.20.0" \
+        "an existing .image (a deliberate pin) must never be rewritten"
+}
+
+test_fix_fails_when_db_env_missing() {
+    rm -f "$SANDBOX_ROOT/db/.env"
+
+    local output rc=0
+    output=$(sandbox_run "fix" "$FIX_ENV") || rc=$?
+
+    assert_equals "1" "$rc" "a lost db/.env is unfixable and must exit 1"
+    assert_contains "$output" "db/.env" "the missing file must be named"
+}
+
+test_fix_installs_missing_compose_plugin() {
+    # apt-get "installs" the plugin by touching a marker the seam checks
+    harness_mock apt-get 'touch "$BROADCAST_ROOT/.compose-installed"
+exit 0'
+    local output rc=0
+    output=$(sandbox_run '
+fix_has_compose() { [ -f "$BROADCAST_ROOT/.compose-installed" ]; }
+fix' "$FIX_ENV") || rc=$?
+
+    assert_equals "0" "$rc" "a repairable compose plugin should not fail the run"
+    harness_assert_called "apt-get install -y docker-compose-plugin" \
+        "the missing plugin must be installed"
+    assert_contains "$output" "fixed:" "the repair must be reported"
+}
+
+test_fix_fails_when_compose_cannot_be_installed() {
+    local output rc=0
+    output=$(sandbox_run '
+fix_has_compose() { return 1; }
+fix' "$FIX_ENV") || rc=$?
+
+    assert_equals "1" "$rc" "an uninstallable compose plugin must exit 1"
+    assert_contains "$output" "FAIL" "the failure must be visible"
+}
+
+test_fix_restores_registry_login() {
+    rm -f "$SANDBOX_ROOT/home/broadcast/.docker/config.json"
+
+    local output
+    output=$(sandbox_run "fix" "$FIX_ENV")
+
+    harness_assert_called "su - broadcast" "the login must run as the broadcast user"
+    assert_contains "$output" "fixed:" "the repair must be reported"
+    assert_file_exists "$SANDBOX_ROOT/home/broadcast/.docker/config.json" \
+        "the login must be verified to have taken effect"
+}
+
+test_fix_reports_failed_service_start_honestly() {
+    # Units present, service inactive, and starting does NOT help (the
+    # non-stateful mock never flips to active). fix must not claim a
+    # repair it cannot verify.
+    touch "$SANDBOX_ROOT/etc/systemd/system/broadcast.service"
+    touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-post-upgrade-cleanup.service"
+    touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-logs-watcher.service"
+    harness_mock systemctl 'case "${1:-}" in
+  is-enabled) exit 0 ;;
+  is-active) exit 1 ;;
+esac
+exit 0'
+
+    local output rc=0
+    output=$(sandbox_run "fix" "$FIX_ENV") || rc=$?
+
+    assert_equals "1" "$rc" "an unverifiable start must fail the run"
+    assert_contains "$output" "FAIL" "the failed start must be reported as FAIL"
+    if [[ "$output" == *"fixed: started broadcast.service"* ]]; then
+        assert_equals "honest failure" "false success" \
+            "fix must never claim it started a service that is still inactive"
+    fi
+}
+
+test_fix_recreates_logrotate_config() {
+    rm -f "$SANDBOX_ROOT/etc/logrotate.d/broadcast"
+
+    local output
+    output=$(sandbox_run "fix" "$FIX_ENV")
+
+    assert_file_exists "$SANDBOX_ROOT/etc/logrotate.d/broadcast" \
+        "logrotate config must be recreated (unbounded log growth otherwise)"
+    assert_contains "$(cat "$SANDBOX_ROOT/etc/logrotate.d/broadcast")" "logs" \
+        "the config must rotate the Broadcast logs"
+    assert_contains "$output" "fixed:" "the repair must be reported"
+}
+
+test_fix_restores_helper_script_exec_bits() {
+    touch "$SANDBOX_ROOT/etc/systemd/system/broadcast.service"
+    touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-post-upgrade-cleanup.service"
+    touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-logs-watcher.service"
+    chmod -x "$SANDBOX_ROOT/scripts/post-upgrade-cleanup.sh"
+
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+
+    if [ ! -x "$SANDBOX_ROOT/scripts/post-upgrade-cleanup.sh" ]; then
+        assert_equals "executable" "not executable" \
+            "a helper script that lost its exec bit must be repaired even when its unit exists"
+    fi
+}
+
+test_fix_adds_missing_secret_key_base() {
+    /usr/bin/grep -v "^SECRET_KEY_BASE=" "$SANDBOX_ROOT/app/.env" > "$SANDBOX_ROOT/app/.env.tmp"
+    mv "$SANDBOX_ROOT/app/.env.tmp" "$SANDBOX_ROOT/app/.env"
+
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+
+    local count
+    count=$(/usr/bin/grep -c "^SECRET_KEY_BASE=" "$SANDBOX_ROOT/app/.env")
+    assert_equals "1" "$count" "a missing SECRET_KEY_BASE must be generated"
+}
+
+test_fix_adds_missing_tls_domain_from_domain_file() {
+    /usr/bin/grep -v "^TLS_DOMAIN=" "$SANDBOX_ROOT/app/.env" > "$SANDBOX_ROOT/app/.env.tmp"
+    mv "$SANDBOX_ROOT/app/.env.tmp" "$SANDBOX_ROOT/app/.env"
+
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+
+    assert_contains "$(cat "$SANDBOX_ROOT/app/.env")" "TLS_DOMAIN=test.example.com" \
+        "TLS_DOMAIN must be re-derived from .domain"
+}
+
+test_fix_copies_database_password_from_db_env() {
+    /usr/bin/grep -v "^DATABASE_PASSWORD=" "$SANDBOX_ROOT/app/.env" > "$SANDBOX_ROOT/app/.env.tmp"
+    mv "$SANDBOX_ROOT/app/.env.tmp" "$SANDBOX_ROOT/app/.env"
+
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+
+    assert_contains "$(cat "$SANDBOX_ROOT/app/.env")" "DATABASE_PASSWORD=pass123" \
+        "a missing DATABASE_PASSWORD must be restored from db/.env (the source of truth)"
+}
+
+test_fix_fails_on_database_password_mismatch() {
+    echo "POSTGRES_PASSWORD=different456" > "$SANDBOX_ROOT/db/.env"
+
+    local output rc=0
+    output=$(sandbox_run "fix" "$FIX_ENV") || rc=$?
+
+    assert_equals "1" "$rc" "mismatched database passwords are not auto-fixable"
+    assert_contains "$output" "FAIL" "the mismatch must be reported loudly"
+}
+
+test_fix_survives_a_failed_repair() {
+    # The watcher unit is missing from BOTH systemd and the scripts dir, so
+    # the cp repair fails. fix must record the failure, keep going, and
+    # still end with an honest summary and exit 1 — not die mid-run.
+    rm -f "$SANDBOX_ROOT/scripts/broadcast-logs-watcher.service"
+
+    local output rc=0
+    output=$(sandbox_run "fix" "$FIX_ENV") || rc=$?
+
+    assert_equals "1" "$rc" "a failed repair must fail the run"
+    assert_contains "$output" "FAIL" "the failed repair must be reported"
+    assert_contains "$output" "Done:" "the run must reach its summary despite the failure"
+}
+
 test_fix_reports_clean_on_healthy_system() {
     # Healthy: correct ownership, units present, cron populated, keys exist
     harness_mock stat 'echo broadcast'
@@ -248,6 +459,21 @@ run_fix_tests() {
     run_test "test_fix_generates_missing_encryption_keys" test_fix_generates_missing_encryption_keys
     run_test "test_fix_fails_on_missing_docker_prerequisite" test_fix_fails_on_missing_docker_prerequisite
     run_test "test_fix_installs_inotify_tools_when_missing" test_fix_installs_inotify_tools_when_missing
+    run_test "test_fix_regenerates_missing_image_file" test_fix_regenerates_missing_image_file
+    run_test "test_fix_image_defaults_to_latest_without_version_file" test_fix_image_defaults_to_latest_without_version_file
+    run_test "test_fix_preserves_existing_image_file" test_fix_preserves_existing_image_file
+    run_test "test_fix_fails_when_db_env_missing" test_fix_fails_when_db_env_missing
+    run_test "test_fix_installs_missing_compose_plugin" test_fix_installs_missing_compose_plugin
+    run_test "test_fix_fails_when_compose_cannot_be_installed" test_fix_fails_when_compose_cannot_be_installed
+    run_test "test_fix_restores_registry_login" test_fix_restores_registry_login
+    run_test "test_fix_reports_failed_service_start_honestly" test_fix_reports_failed_service_start_honestly
+    run_test "test_fix_recreates_logrotate_config" test_fix_recreates_logrotate_config
+    run_test "test_fix_restores_helper_script_exec_bits" test_fix_restores_helper_script_exec_bits
+    run_test "test_fix_adds_missing_secret_key_base" test_fix_adds_missing_secret_key_base
+    run_test "test_fix_adds_missing_tls_domain_from_domain_file" test_fix_adds_missing_tls_domain_from_domain_file
+    run_test "test_fix_copies_database_password_from_db_env" test_fix_copies_database_password_from_db_env
+    run_test "test_fix_fails_on_database_password_mismatch" test_fix_fails_on_database_password_mismatch
+    run_test "test_fix_survives_a_failed_repair" test_fix_survives_a_failed_repair
     run_test "test_fix_reports_clean_on_healthy_system" test_fix_reports_clean_on_healthy_system
 
     local result
