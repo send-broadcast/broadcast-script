@@ -56,7 +56,7 @@ test_help_command_lists_all_commands() {
 main help")
 
     local cmd
-    for cmd in install update upgrade downgrade restart backup restore monitor trigger diagnose; do
+    for cmd in install update upgrade downgrade restart backup restore monitor trigger diagnose fix; do
         assert_contains "$output" "$cmd" "help should mention '$cmd'"
     done
 }
@@ -149,10 +149,11 @@ backup_database() { echo ROUTED_backup_database; }
 monitor() { echo ROUTED_monitor; }
 trigger() { echo ROUTED_trigger; }
 diagnose() { echo ROUTED_diagnose; }
-main start; main stop; main restart; main backup_database; main monitor; main trigger; main diagnose")
+fix() { echo ROUTED_fix; }
+main start; main stop; main restart; main backup_database; main monitor; main trigger; main diagnose; main fix")
 
     local cmd
-    for cmd in start stop restart backup_database monitor trigger diagnose; do
+    for cmd in start stop restart backup_database monitor trigger diagnose fix; do
         assert_contains "$output" "ROUTED_$cmd" "'$cmd' should route to $cmd()"
     done
 }

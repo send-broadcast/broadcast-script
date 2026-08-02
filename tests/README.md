@@ -122,6 +122,15 @@ Test the real functions from the management scripts in isolation.
   contents, OOM/system state capture, tarball output, and exit 0 even
   when every collector fails
 
+**test_fix.sh** (real `fix.sh`):
+- Idempotent drift repair: missing directories/sudoers/systemd units
+  recreated, executable bits and ownership restored (and left alone when
+  correct), docker group membership repaired, services enabled/started
+  when inactive, cron entries added exactly once while preserving
+  unrelated entries, encryption keys generated when absent, unfixable
+  prerequisites (missing docker) exit 1, and a healthy system reports
+  all-ok with nothing repaired
+
 ### Integration Tests (`tests/integration/`)
 
 Test complete workflows through the real scripts.

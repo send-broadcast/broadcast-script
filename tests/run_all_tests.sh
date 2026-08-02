@@ -132,6 +132,7 @@ run_unit_tests() {
     run_test_suite "Upgrade/Downgrade Functions" "$SCRIPT_DIR/unit/test_upgrade_downgrade.sh"
     run_test_suite "Monitor Functions" "$SCRIPT_DIR/unit/test_monitor.sh"
     run_test_suite "Diagnose Command" "$SCRIPT_DIR/unit/test_diagnose.sh"
+    run_test_suite "Fix Command" "$SCRIPT_DIR/unit/test_fix.sh"
     run_test_suite "broadcast.sh Routing" "$SCRIPT_DIR/unit/test_broadcast_routing.sh"
     run_test_suite "System Service Scripts" "$SCRIPT_DIR/unit/test_system_services.sh"
     run_test_suite "Docker Reference Consistency" "$SCRIPT_DIR/unit/test_docker_references.sh"
