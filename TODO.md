@@ -23,9 +23,14 @@ Carried to a future sprint:
       debate: external actor, never container self-monitoring.
 - [ ] Log persistence across `compose down` (postmortem friction 9a);
       journald forwarding is the preferred shape.
-- [ ] Rails-repo items: procps in the image (friction 9), entrypoint
-      exits when Puma dies (cheap exit-based layer; wedges stay with
-      the external supervisor).
+- [x] Rails-repo items resolved (2026-08-03): procps added to the image
+      runtime stage (broadcast c099f0d9; ships with the next image
+      release). Entrypoint exit-on-death needed NO change — live-tested
+      by killing Puma inside the production container: Thruster 0.1.15
+      exited with it and restart:always self-healed in ~1s, under
+      monitoring's hysteresis (no false alarm). The 2-day outage class
+      is wedge-only, which is exactly what the parked supervisor tier
+      covers and monitoring already detects in ~3 minutes.
 - [ ] README: list Ubuntu 26.04 as supported (smoke-validated).
 - [ ] Dashboard data hygiene: duplicate broadcast.furvur.com
       registration (two licenses; only one can ever report).
