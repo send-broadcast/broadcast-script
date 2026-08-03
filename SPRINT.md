@@ -4,25 +4,18 @@ Carried from the server-monitoring sprint (closed 2026-08-03). Context and
 history in TODO.md; incident background in the broadcast repo's
 TROUBLESHOOT.md (untracked).
 
-## 1. Log persistence across `compose down` (postmortem friction 9a)
+## 1. Log persistence across `compose down` — DONE (2026-08-03, TDD)
 
-The last open item from the firstborngroup incident. `restart`/`stop` run
-`docker compose down` via the systemd unit, which REMOVES containers and
-destroys their logs — the standard remediation erases the evidence of the
-incident it fixes. `diagnose`'s capture-first discipline mitigates but does
-not remove the root cause.
-
-Recommended shape: forward the compose `logging` driver to journald — logs
-survive container removal, are queryable with `journalctl CONTAINER_NAME=app`,
-and `ExecStop` semantics stay untouched (safer than switching `down` to
-`stop`). Notes:
-- Logging-driver changes take effect on container RECREATION, so rollout
-  needs an upgrade/restart cycle to actually apply.
-- `docker logs` stops working with the journald driver unless dual-logging
-  is available — diagnose's log-capture step must be updated in the same
-  change, and tested.
-- Validate in the smoke VM: restart the stack, confirm pre-restart log
-  lines are still retrievable.
+Shipped exactly in the recommended shape: journald logging driver in the
+production compose file (`journalctl CONTAINER_NAME=app`), diagnose
+captures journal-first with a `docker logs` fallback for pre-migration
+containers, and `ExecStop` semantics untouched. Validated on a real VM:
+restart-survival phase (marker survives compose down in journald, absent
+from the fresh container) plus a `--test-upgrade` run proving web-UI log
+streaming still works under journald via dual logging. Rollout: nightly
+update delivers the compose file; the driver applies at the next container
+recreation (every restart recreates, since ExecStop is `down`). Full
+detail in TODO.md.
 
 ## 2. Auto-remediation supervisor tier
 

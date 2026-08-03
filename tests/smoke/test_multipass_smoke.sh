@@ -794,6 +794,59 @@ display_inspection() {
 }
 
 #######################
+# Phase 4c: Log persistence across restart (journald)
+#######################
+
+# Postmortem friction 9a: `broadcast.sh restart` goes through the systemd
+# unit's ExecStop=`docker compose down`, which removes the containers and —
+# under the old json-file driver — destroyed their logs, erasing incident
+# evidence. With the journald driver the history must survive. We write a
+# marker into the app container's stdout (via /proc/1/fd/1 — docker exec
+# output itself never reaches the container log), restart the stack, and
+# require the marker in journald while the FRESH container's `docker logs`
+# does not have it (proving survival came from the journal, not a
+# surviving container).
+test_log_persistence_across_restart() {
+    log_info "=== Phase 4c: Log persistence across restart ==="
+
+    local marker="SMOKE-LOG-PERSIST-$(date +%s)"
+
+    log_test "marker lands in journald before the restart"
+    vm_exec_root "docker exec app sh -c \"echo $marker > /proc/1/fd/1\""
+    if wait_for_check "marker in journal" \
+        "journalctl CONTAINER_NAME=app --no-pager | grep -q $marker" 6 5; then
+        log_success "marker visible in journald"
+    else
+        log_fail "marker never reached journald (is the journald logging driver active?)"
+    fi
+
+    log_info "Restarting the stack (compose down destroys the containers)..."
+    vm_exec_root "cd /opt/broadcast && ./broadcast.sh restart"
+
+    log_test "stack is healthy again after restart"
+    if wait_for_check "app container running" \
+        "docker inspect -f {{.State.Status}} app | grep -q running" 24 5; then
+        log_success "app container running after restart"
+    else
+        log_fail "app container did not come back after restart"
+    fi
+
+    log_test "pre-restart log line survives the compose down"
+    if vm_exec_root "journalctl CONTAINER_NAME=app --no-pager | grep -q $marker"; then
+        log_success "journald kept the pre-restart history"
+    else
+        log_fail "pre-restart logs were destroyed by the restart"
+    fi
+
+    log_test "fresh container has no pre-restart history in docker logs"
+    if vm_exec_root "docker logs app 2>&1 | grep -q $marker"; then
+        log_fail "docker logs still shows the marker — the container survived, test proves nothing"
+    else
+        log_success "marker absent from the fresh container (survival came from journald)"
+    fi
+}
+
+#######################
 # Phase 5: Reboot Recovery
 #######################
 
@@ -1169,6 +1222,7 @@ run_for_version() {
     run_install_state_checks
     test_backup_restore_cycle
     display_inspection
+    test_log_persistence_across_restart
 
     if [ "$FLAG_TEST_REBOOT" = true ]; then
         test_reboot_recovery

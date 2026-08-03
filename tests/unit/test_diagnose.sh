@@ -123,6 +123,49 @@ test_diagnose_captures_full_container_logs_first() {
     harness_assert_call_order "docker logs app" "docker exec app curl"
 }
 
+# --- journald log capture ---------------------------------------------------
+# With the compose journald logging driver, container logs survive
+# `compose down` in the systemd journal — including logs of containers that
+# no longer exist, which `docker logs` can never see. diagnose must prefer
+# that durable history and only fall back to `docker logs` on servers whose
+# containers still run the old json-file driver (empty journal).
+
+test_diagnose_captures_logs_from_journald_when_present() {
+    sandbox_run "diagnose" \
+        'export JOURNALCTL_MOCK=$'"'"'{"msg":"Request","path":"/track/open/1"}\nPuma caught this error: Broken pipe (Errno::EPIPE)\njournal line from a REMOVED container'"'"'' >/dev/null
+
+    local dir
+    dir=$(bundle_dir)
+    assert_contains "$(cat "${dir}app.log")" "journal line from a REMOVED container" \
+        "the journal history (incl. removed containers) must be what gets captured"
+
+    harness_assert_called "journalctl CONTAINER_NAME=app" \
+        "capture must query the journal per container"
+    harness_assert_not_called "docker logs app" \
+        "docker logs must not be used when the journal has history"
+
+    # The filtered app log must be built from the journal capture too
+    assert_contains "$(cat "${dir}app-filtered.log")" "Puma caught this error" \
+        "the crash line must survive filtering of the journal capture"
+
+    # Evidence before probes, same discipline as the docker-logs path
+    harness_assert_call_order "journalctl CONTAINER_NAME=app" "docker exec app curl"
+}
+
+test_diagnose_falls_back_to_docker_logs_without_journal_history() {
+    # Default JOURNALCTL_MOCK is empty — a pre-migration server whose
+    # containers still log to json-file. Capture must not silently produce
+    # empty log files; it must fall back to docker logs.
+    sandbox_run "diagnose" >/dev/null
+
+    local dir
+    dir=$(bundle_dir)
+    assert_contains "$(cat "${dir}app.log")" "Puma caught this error" \
+        "an empty journal must fall back to docker logs for the evidence"
+    harness_assert_called "docker logs app" \
+        "the fallback path must run when the journal has no history"
+}
+
 test_diagnose_filters_thruster_noise_from_app_log() {
     sandbox_run "diagnose" >/dev/null
 
@@ -526,6 +569,8 @@ run_diagnose_tests() {
 
     run_test "test_diagnose_creates_bundle_and_tarball" test_diagnose_creates_bundle_and_tarball
     run_test "test_diagnose_captures_full_container_logs_first" test_diagnose_captures_full_container_logs_first
+    run_test "test_diagnose_captures_logs_from_journald_when_present" test_diagnose_captures_logs_from_journald_when_present
+    run_test "test_diagnose_falls_back_to_docker_logs_without_journal_history" test_diagnose_falls_back_to_docker_logs_without_journal_history
     run_test "test_diagnose_filters_thruster_noise_from_app_log" test_diagnose_filters_thruster_noise_from_app_log
     run_test "test_diagnose_records_layered_probes" test_diagnose_records_layered_probes
     run_test "test_diagnose_flags_thruster_up_puma_down_fingerprint" test_diagnose_flags_thruster_up_puma_down_fingerprint

@@ -23,10 +23,11 @@ services:
       postgres:
         condition: service_healthy
     logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      # journald survives `compose down` (json-file logs die with the
+      # container); query with `journalctl CONTAINER_NAME=<name>`.
+      # Retention is governed by systemd journal config, and `docker logs`
+      # keeps working via Docker's default dual-logging cache.
+      driver: "journald"
   job:
     image: ${DOCKER_IMAGE:-gitea.hostedapp.org/broadcast/broadcast:latest}
     platform: linux/${TARGETARCH:-amd64}
@@ -46,10 +47,11 @@ services:
     command:
       - "bin/jobs"
     logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      # journald survives `compose down` (json-file logs die with the
+      # container); query with `journalctl CONTAINER_NAME=<name>`.
+      # Retention is governed by systemd journal config, and `docker logs`
+      # keeps working via Docker's default dual-logging cache.
+      driver: "journald"
   postgres:
     image: postgres:17-alpine
     container_name: postgres
@@ -71,10 +73,11 @@ services:
     networks:
       - broadcast-network
     logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      # journald survives `compose down` (json-file logs die with the
+      # container); query with `journalctl CONTAINER_NAME=<name>`.
+      # Retention is governed by systemd journal config, and `docker logs`
+      # keeps working via Docker's default dual-logging cache.
+      driver: "journald"
 
 networks:
   broadcast-network:

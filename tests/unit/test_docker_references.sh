@@ -101,6 +101,28 @@ test_compose_up_must_not_depend_on_the_registry() {
     done
 }
 
+# Postmortem friction 9a (firstborngroup): the systemd unit's ExecStop runs
+# `docker compose down`, which REMOVES containers and destroys their
+# json-file logs — the standard remediation erases the incident's evidence.
+# Production logging must go to journald, which survives container removal
+# (`journalctl CONTAINER_NAME=app`). `docker logs`/streaming keep working
+# via Docker's default dual-logging cache. The manual/dev compose file
+# deliberately stays on json-file: macOS Docker has no journald.
+test_production_compose_logs_to_journald() {
+    local journald_count json_count
+    journald_count=$(/usr/bin/grep -c 'driver: "journald"' "$COMPOSE_FILE" || true)
+    assert_equals "3" "$journald_count" \
+        "app, job and postgres must log to journald so logs survive compose down"
+
+    json_count=$(/usr/bin/grep -c 'driver: "json-file"' "$COMPOSE_FILE" || true)
+    assert_equals "0" "$json_count" \
+        "no production service may keep the json-file driver (logs die with the container)"
+
+    json_count=$(/usr/bin/grep -c 'driver: "json-file"' "$PROJECT_ROOT/docker-compose.manual.yml" || true)
+    assert_not_equals "0" "$json_count" \
+        "the manual/dev compose file must stay on json-file (no journald on macOS)"
+}
+
 run_docker_reference_tests() {
     echo "Running Docker Reference Consistency Tests"
     echo "=========================================="
@@ -111,6 +133,7 @@ run_docker_reference_tests() {
     run_test "test_service_references_exist_in_compose" test_service_references_exist_in_compose
     run_test "test_container_references_exist_in_compose" test_container_references_exist_in_compose
     run_test "test_compose_up_must_not_depend_on_the_registry" test_compose_up_must_not_depend_on_the_registry
+    run_test "test_production_compose_logs_to_journald" test_production_compose_logs_to_journald
 
     local result
     print_test_summary

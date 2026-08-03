@@ -37,11 +37,19 @@ function diagnose() {
 
   echo -e "\e[33mCollecting diagnostic bundle in $bundle ...\e[0m"
 
-  # 1. Evidence first: full container logs, before anything can wipe them
+  # 1. Evidence first: full container logs, before anything can wipe them.
+  # Prefer the journal — with the journald logging driver it holds the full
+  # history INCLUDING containers a restart already removed, evidence
+  # `docker logs` can never see. Fall back to `docker logs` on installs
+  # whose containers still run the old json-file driver (empty journal).
   local container
   for container in app job postgres; do
-    docker logs "$container" > "$bundle/$container.log" 2>&1 \
-      || echo "failed to capture $container logs" >> "$bundle/errors.txt"
+    journalctl CONTAINER_NAME="$container" --no-pager -o short-iso \
+      > "$bundle/$container.log" 2>/dev/null || true
+    if ! grep -q . "$bundle/$container.log" 2>/dev/null; then
+      docker logs "$container" > "$bundle/$container.log" 2>&1 \
+        || echo "failed to capture $container logs" >> "$bundle/errors.txt"
+    fi
   done
 
   # 2. Filtered app log: strip Thruster access/proxy noise so Puma output

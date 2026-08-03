@@ -1,5 +1,36 @@
 # TODO
 
+## Log persistence across compose down (2026-08-03, TDD — sprint item 1)
+
+The last open item from the firstborngroup incident: the systemd unit's
+ExecStop runs `docker compose down`, which removes containers and (under
+json-file logging) destroyed their logs — remediation erased the evidence.
+
+TDD-first, journald shape from SPRINT.md:
+- [x] Test red: production compose must use the journald driver for
+      app/job/postgres; manual/dev compose stays json-file (macOS has no
+      journald) — tests/unit/test_docker_references.sh
+- [x] Test red: diagnose captures from the journal when history exists
+      (incl. removed containers), falls back to `docker logs` on
+      pre-migration installs — tests/unit/test_diagnose.sh
+- [x] Smoke phase 4c (always-on): marker into app stdout via
+      /proc/1/fd/1 → `broadcast.sh restart` → marker must survive in
+      journald AND be absent from the fresh container's `docker logs`
+- [x] Implementation: journald driver in docker-compose.yml (comments
+      worded to dodge the reference-scanner greps); journal-first capture
+      in scripts/diagnose.sh
+- [x] Smoke run green on a real VM (2026-08-03, Ubuntu 24.04, two runs):
+      Phase 4c restart-survival passed (marker survived compose down in
+      journald, absent from the fresh container), and a `--test-upgrade`
+      run proved web-UI log streaming works end-to-end under journald via
+      dual logging (reattach across container recreation included)
+
+Rollout notes: driver applies on container RECREATION — nightly update
+delivers the compose file, and the next restart/upgrade/reboot recreates
+containers onto journald (ExecStop=down means every service restart
+recreates). Until then diagnose's fallback covers the gap. journald
+retention is systemd's (Ubuntu default: capped at 10% of disk / 4G).
+
 ## Boot resilience after reboot (2026-08-03, TDD)
 
 Incident: Simon rebooted the production server; broadcast.service failed to
