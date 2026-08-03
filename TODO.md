@@ -15,13 +15,10 @@ unhealthy sent 13:41:01 (+ down-alert email) → restarted 13:41:22 →
 healthy sent 13:42:01 (+ recovery email). Detection-to-alert ~2 minutes,
 vs the 2-day silent outage that motivated the feature.
 
-Carried to a future sprint:
-- [ ] Auto-remediation tier (second opt-in beyond alerting): host
-      supervisor restarts the app container on unhealthy, with
-      evidence capture BEFORE restart and a restart budget
-      (3/hour → stop and escalate). Design settled in the supervision
-      debate: external actor, never container self-monitoring.
-- [ ] Log persistence across `compose down` (postmortem friction 9a);
+Carried to the next sprint — see SPRINT.md for full context:
+- [→] Auto-remediation supervisor tier (design settled; awaiting real
+      alert-traffic data to tune the restart budget).
+- [→] Log persistence across `compose down` (postmortem friction 9a);
       journald forwarding is the preferred shape.
 - [x] Rails-repo items resolved (2026-08-03): procps added to the image
       runtime stage (broadcast c099f0d9; ships with the next image
@@ -31,9 +28,9 @@ Carried to a future sprint:
       monitoring's hysteresis (no false alarm). The 2-day outage class
       is wedge-only, which is exactly what the parked supervisor tier
       covers and monitoring already detects in ~3 minutes.
-- [ ] README: list Ubuntu 26.04 as supported (smoke-validated).
-- [ ] Dashboard data hygiene: duplicate broadcast.furvur.com
-      registration (two licenses; only one can ever report).
+- [x] README lists Ubuntu 24.04 and 26.04 as supported (2026-08-03).
+- [x] Dashboard data hygiene: duplicate broadcast.furvur.com
+      registration removed by Simon (2026-08-03).
 
 ## Support tooling (from broadcast/TROUBLESHOOT.md, firstborngroup 520 case)
 

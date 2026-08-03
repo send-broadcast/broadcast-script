@@ -6,7 +6,7 @@ This script installs the Broadcast script on a Linux server. It sets up the nece
 
 ## System Requirements
 
-- Ubuntu Server 24.04 (fresh install)
+- Ubuntu Server 24.04 or 26.04 (fresh install)
 - Minimum 2GB RAM
 - Minimum 40GB disk space
 
