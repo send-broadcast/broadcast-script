@@ -98,6 +98,33 @@ export CURL_MOCK_BODY='$body'")
     assert_contains "$output" "dashboard" "the way to enable it should be pointed at"
 }
 
+test_validate_license_replaces_credentials_instead_of_appending() {
+    # validate_license is now an information command operators run casually
+    # — repeated runs must not grow .env with duplicate credential lines.
+    local run_env="
+export CURL_MOCK_HTTP_CODE=200
+export CURL_MOCK_BODY='$VALID_LICENSE_RESPONSE'"
+    sandbox_run "validate_license" "$run_env" >/dev/null
+    sandbox_run "validate_license" "$run_env" >/dev/null
+
+    assert_equals "3" "$(registry_lines_in_env)" \
+        ".env must hold exactly one line per registry credential after repeated runs"
+    assert_contains "$(cat "$SANDBOX_ROOT/.env")" "BROADCAST_REGISTRY_PASSWORD=s3cret" \
+        "the current credentials must be present"
+}
+
+test_validate_license_preserves_unrelated_env_lines() {
+    echo "SOME_OTHER_SETTING=keep-me" > "$SANDBOX_ROOT/.env"
+
+    sandbox_run "validate_license" "
+export CURL_MOCK_HTTP_CODE=200
+export CURL_MOCK_BODY='$VALID_LICENSE_RESPONSE'" >/dev/null
+
+    assert_contains "$(cat "$SANDBOX_ROOT/.env")" "SOME_OTHER_SETTING=keep-me" \
+        "non-registry lines must survive a credential refresh"
+    assert_equals "3" "$(registry_lines_in_env)" "credentials written once"
+}
+
 test_validate_license_rejects_401_as_invalid_key() {
     local rc=0 output
     output=$(sandbox_run "validate_license" "
@@ -198,6 +225,8 @@ run_functional_tests() {
     run_test "test_validate_license_prints_the_operator_summary" test_validate_license_prints_the_operator_summary
     run_test "test_validate_license_flags_an_available_update" test_validate_license_flags_an_available_update
     run_test "test_validate_license_notes_disabled_monitoring" test_validate_license_notes_disabled_monitoring
+    run_test "test_validate_license_replaces_credentials_instead_of_appending" test_validate_license_replaces_credentials_instead_of_appending
+    run_test "test_validate_license_preserves_unrelated_env_lines" test_validate_license_preserves_unrelated_env_lines
     run_test "test_validate_license_rejects_401_as_invalid_key" test_validate_license_rejects_401_as_invalid_key
     run_test "test_validate_license_rejects_unexpected_http_status" test_validate_license_rejects_unexpected_http_status
     run_test "test_validate_license_rejects_malformed_json" test_validate_license_rejects_malformed_json

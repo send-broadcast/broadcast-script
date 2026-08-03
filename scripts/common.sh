@@ -160,6 +160,12 @@ validate_license() {
 
   echo -e "\e[32mLicense key valid!\e[0m"
 
+  # Replace, never append: validate_license is run casually for its
+  # summary, and blind appends would grow .env with duplicate credentials
+  if [ -f /opt/broadcast/.env ]; then
+    grep -v "^BROADCAST_REGISTRY_" /opt/broadcast/.env > /opt/broadcast/.env.tmp || true
+    mv /opt/broadcast/.env.tmp /opt/broadcast/.env
+  fi
   echo "BROADCAST_REGISTRY_URL=$registry_url" >> /opt/broadcast/.env
   echo "BROADCAST_REGISTRY_LOGIN=$registry_login" >> /opt/broadcast/.env
   echo "BROADCAST_REGISTRY_PASSWORD=$registry_password" >> /opt/broadcast/.env
