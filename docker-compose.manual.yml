@@ -2,7 +2,7 @@ services:
   app:
     image: ${DOCKER_IMAGE:-gitea.hostedapp.org/broadcast/broadcast:latest}
     platform: linux/${TARGETARCH:-amd64}
-    pull_policy: always
+    pull_policy: missing
     container_name: app
     restart: always
     env_file:
@@ -28,7 +28,7 @@ services:
   job:
     image: ${DOCKER_IMAGE:-gitea.hostedapp.org/broadcast/broadcast:latest}
     platform: linux/${TARGETARCH:-amd64}
-    pull_policy: always
+    pull_policy: missing
     container_name: job
     restart: always
     env_file:

@@ -197,10 +197,18 @@ function fix() {
   # --- systemd units: installed, enabled, running ------------------------
   local units_changed=false
 
+  # Existence is not enough: a unit left over from an older install may
+  # predate the boot-resilience settings (the 2026-08-03 reboot lockout).
+  # Compare against the current template and rewrite on any drift.
+  source /opt/broadcast/scripts/init-services.sh
   if [ -f /etc/systemd/system/broadcast.service ]; then
-    fix_ok "broadcast.service unit installed"
+    if refresh_broadcast_service > /dev/null; then
+      fix_did "refreshed a stale broadcast.service unit"
+      units_changed=true
+    else
+      fix_ok "broadcast.service unit installed and current"
+    fi
   else
-    source /opt/broadcast/scripts/init-services.sh
     create_broadcast_service > /dev/null
     fix_did "created broadcast.service"
     units_changed=true

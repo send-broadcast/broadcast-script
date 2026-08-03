@@ -174,6 +174,58 @@ test_upgrade_continue_adds_health_cron_for_older_installs() {
         "existing cron entries must survive"
 }
 
+test_upgrade_continue_refreshes_stale_broadcast_unit() {
+    # The unit file is written once at install; existing servers kept the
+    # pre-incident template (no RestartSec / StartLimitIntervalSec /
+    # network-online ordering) forever because no path rewrote it. The
+    # upgrade path is the delivery vehicle for unit fixes.
+    cat > "$SANDBOX_ROOT/etc/systemd/system/broadcast.service" <<'STALE'
+[Unit]
+Description=Broadcast
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c "docker compose up"
+Restart=always
+User=broadcast
+
+[Install]
+WantedBy=multi-user.target
+STALE
+
+    sandbox_run "_upgrade_continue 2.5.0" >/dev/null
+
+    local unit
+    unit=$(cat "$SANDBOX_ROOT/etc/systemd/system/broadcast.service")
+    assert_contains "$unit" "StartLimitIntervalSec=0" \
+        "upgrade must rewrite a stale broadcast.service unit"
+    assert_contains "$unit" "RestartSec=" \
+        "the refreshed unit must space out restart attempts"
+
+    # The reload must land before the service is started with the new unit
+    harness_assert_call_order \
+        "systemctl daemon-reload" \
+        "systemctl start broadcast"
+}
+
+test_upgrade_continue_leaves_current_broadcast_unit_alone() {
+    sandbox_run "create_broadcast_service" >/dev/null
+    local before
+    before=$(cat "$SANDBOX_ROOT/etc/systemd/system/broadcast.service")
+
+    local output
+    output=$(sandbox_run "_upgrade_continue 2.5.0")
+
+    assert_equals "$before" "$(cat "$SANDBOX_ROOT/etc/systemd/system/broadcast.service")" \
+        "an already-current unit must survive an upgrade byte-identical"
+    if [[ "$output" == *"broadcast.service unit refreshed"* ]]; then
+        assert_equals "no refresh message" "refresh message printed" \
+            "upgrade must not claim to refresh a unit that was already current"
+    fi
+}
+
 # --- _downgrade_continue --------------------------------------------------
 
 test_downgrade_continue_full_sequence() {
@@ -215,6 +267,8 @@ run_upgrade_downgrade_tests() {
     run_test "test_upgrade_continue_adds_encryption_keys_when_missing" test_upgrade_continue_adds_encryption_keys_when_missing
     run_test "test_upgrade_continue_preserves_existing_encryption_keys" test_upgrade_continue_preserves_existing_encryption_keys
     run_test "test_upgrade_continue_adds_health_cron_for_older_installs" test_upgrade_continue_adds_health_cron_for_older_installs
+    run_test "test_upgrade_continue_refreshes_stale_broadcast_unit" test_upgrade_continue_refreshes_stale_broadcast_unit
+    run_test "test_upgrade_continue_leaves_current_broadcast_unit_alone" test_upgrade_continue_leaves_current_broadcast_unit_alone
     run_test "test_downgrade_continue_full_sequence" test_downgrade_continue_full_sequence
 
     local result

@@ -163,6 +163,36 @@ test_fix_installs_missing_systemd_units() {
     harness_assert_called "systemctl daemon-reload" "systemd must reload after unit installs"
 }
 
+test_fix_refreshes_stale_broadcast_unit() {
+    # Incident (2026-08-03): production units still carried the install-time
+    # template with no RestartSec / StartLimitIntervalSec — a reboot race
+    # locked the service into 'failed'. fix must treat a stale unit as
+    # drift and rewrite it, not report ok because the file merely exists.
+    cat > "$SANDBOX_ROOT/etc/systemd/system/broadcast.service" <<'STALE'
+[Unit]
+Description=Broadcast
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c "docker compose up"
+Restart=always
+User=broadcast
+
+[Install]
+WantedBy=multi-user.target
+STALE
+
+    local output
+    output=$(sandbox_run "fix" "$FIX_ENV")
+
+    assert_contains "$(cat "$SANDBOX_ROOT/etc/systemd/system/broadcast.service")" \
+        "StartLimitIntervalSec=0" "a stale unit must be rewritten to the current template"
+    assert_contains "$output" "fixed:" "the unit refresh must be reported as a repair"
+    harness_assert_called "systemctl daemon-reload" "systemd must reload after the rewrite"
+}
+
 test_fix_enables_and_starts_inactive_services() {
     # Units present but disabled/stopped
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast.service"
@@ -412,9 +442,11 @@ test_fix_survives_a_failed_repair() {
 }
 
 test_fix_reports_clean_on_healthy_system() {
-    # Healthy: correct ownership, units present, cron populated, keys exist
+    # Healthy: correct ownership, units present AND current, cron populated,
+    # keys exist. broadcast.service must match the template — an empty or
+    # stale unit is drift that fix repairs.
     harness_mock stat 'echo broadcast'
-    touch "$SANDBOX_ROOT/etc/systemd/system/broadcast.service"
+    sandbox_run "create_broadcast_service" >/dev/null
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-post-upgrade-cleanup.service"
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-logs-watcher.service"
     echo "broadcast ALL=(ALL) NOPASSWD:ALL" > "$SANDBOX_ROOT/etc/sudoers.d/broadcast"
@@ -453,6 +485,7 @@ run_fix_tests() {
     run_test "test_fix_recreates_missing_sudoers_entry" test_fix_recreates_missing_sudoers_entry
     run_test "test_fix_restores_docker_group_membership" test_fix_restores_docker_group_membership
     run_test "test_fix_installs_missing_systemd_units" test_fix_installs_missing_systemd_units
+    run_test "test_fix_refreshes_stale_broadcast_unit" test_fix_refreshes_stale_broadcast_unit
     run_test "test_fix_enables_and_starts_inactive_services" test_fix_enables_and_starts_inactive_services
     run_test "test_fix_adds_missing_cron_entries_once" test_fix_adds_missing_cron_entries_once
     run_test "test_fix_preserves_existing_cron_entries" test_fix_preserves_existing_cron_entries

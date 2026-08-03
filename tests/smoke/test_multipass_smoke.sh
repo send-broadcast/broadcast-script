@@ -807,6 +807,56 @@ test_reboot_recovery() {
     run_health_checks "Phase 5 (post-reboot)"
 }
 
+# Phase 5b: the 2026-08-03 incident, reproduced for real — reboot while the
+# image registry is unreachable. Before the fix, `pull_policy: always` made
+# compose exit 18 at boot, systemd burned its start rate limit in seconds,
+# and broadcast.service sat in 'failed' until a human intervened. With the
+# fix, boot must come up from cached images and never rate-limit-lock.
+# The registry is blackholed via /etc/hosts (both hostnames resolve to
+# 127.0.0.1 -> connection refused, exactly what the incident logged).
+test_boot_registry_outage() {
+    log_info "=== Phase 5b: Reboot with the registry unreachable ==="
+
+    local registry_host="gitea.hostedapp.org"
+
+    log_info "Blackholing ${registry_host} in /etc/hosts..."
+    vm_exec_root "cp /etc/hosts /etc/hosts.smoke-backup && printf \"127.0.0.1 ${registry_host}\n\" >> /etc/hosts"
+
+    log_info "Rebooting VM with the registry unreachable..."
+    cd "$VAGRANT_DIR" && vagrant reload
+
+    log_test "broadcast.service becomes active from cached images (no registry)"
+    if wait_for_check "broadcast.service active" \
+        "systemctl is-active --quiet broadcast.service" 24 5; then
+        log_success "service came up without registry access"
+    else
+        log_fail "service did not come up while the registry was unreachable"
+    fi
+
+    log_test "no systemd start-rate-limit lockout during boot"
+    # Quote-free remote grep pattern: vm_exec_root's nested quoting mangles
+    # single-quoted arguments (see the 2026-08-01 smoke-test note).
+    if vm_exec_root "journalctl -b -u broadcast --no-pager | grep -q too.quickly"; then
+        log_fail "journal shows the rate-limit lockout (Start request repeated too quickly)"
+    else
+        log_success "no rate-limit lockout in the boot journal"
+    fi
+
+    log_test "app container is running despite the unreachable registry"
+    if wait_for_check "app container running" \
+        "docker inspect -f {{.State.Status}} app | grep -q running" 12 5; then
+        log_success "app container running from the local image cache"
+    else
+        log_fail "app container not running"
+    fi
+
+    log_info "Restoring /etc/hosts..."
+    vm_exec_root "mv /etc/hosts.smoke-backup /etc/hosts"
+
+    # The stack must still be fully healthy once the registry is back.
+    run_health_checks "Phase 5b (post-outage)"
+}
+
 #######################
 # Phase 6: Upgrade-path — watcher restart + log streaming survival
 #######################
@@ -1075,7 +1125,7 @@ parse_args() {
                 echo "  --ubuntu VERSION  Ubuntu version to test: 24.04, 26.04, or all (default: all)"
                 echo "  --local           Test the local working tree instead of cloning the canonical remote"
                 echo "  --no-cleanup      Keep VM after test for debugging"
-                echo "  --test-reboot     Also verify services survive a reboot"
+                echo "  --test-reboot     Also verify services survive a reboot (incl. a reboot with the registry unreachable)"
                 echo "  --test-upgrade    Also verify the log-streaming watcher restart + streaming survives container recreation"
                 echo "  --test-real-upgrade  Run a genuine 'broadcast.sh upgrade' (use with --from-ref to install an older rev first)"
                 echo "  --from-ref REF    Reset /opt/broadcast to REF before install (remote mode), so an upgrade is genuine old->new"
@@ -1122,6 +1172,7 @@ run_for_version() {
 
     if [ "$FLAG_TEST_REBOOT" = true ]; then
         test_reboot_recovery
+        test_boot_registry_outage
     fi
 
     if [ "$FLAG_TEST_UPGRADE" = true ]; then

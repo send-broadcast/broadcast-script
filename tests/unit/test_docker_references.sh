@@ -82,6 +82,25 @@ test_container_references_exist_in_compose() {
     done
 }
 
+# Incident (2026-08-03): `pull_policy: always` made `docker compose up`
+# contact the registry before starting containers, so a reboot where the
+# network came up after docker left Broadcast down (exit 18, then systemd
+# rate-limit lockout) — despite perfectly good images in the local cache.
+# Boot must never depend on the registry: upgrades pull explicitly
+# (upgrade.sh runs `docker compose pull`), so `up` only needs `missing`.
+test_compose_up_must_not_depend_on_the_registry() {
+    local file always_count missing_count
+    for file in "$COMPOSE_FILE" "$PROJECT_ROOT/docker-compose.manual.yml"; do
+        always_count=$(/usr/bin/grep -c "pull_policy: always" "$file" || true)
+        assert_equals "0" "$always_count" \
+            "$(basename "$file"): pull_policy: always makes boot fail when the registry is unreachable"
+
+        missing_count=$(/usr/bin/grep -c "pull_policy: missing" "$file" || true)
+        assert_equals "2" "$missing_count" \
+            "$(basename "$file"): app and job should pin pull_policy: missing so up never pulls"
+    done
+}
+
 run_docker_reference_tests() {
     echo "Running Docker Reference Consistency Tests"
     echo "=========================================="
@@ -91,6 +110,7 @@ run_docker_reference_tests() {
     run_test "test_compose_file_parses" test_compose_file_parses
     run_test "test_service_references_exist_in_compose" test_service_references_exist_in_compose
     run_test "test_container_references_exist_in_compose" test_container_references_exist_in_compose
+    run_test "test_compose_up_must_not_depend_on_the_registry" test_compose_up_must_not_depend_on_the_registry
 
     local result
     print_test_summary

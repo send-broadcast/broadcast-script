@@ -74,6 +74,91 @@ exit 0'
         "the service should still be enabled"
 }
 
+# --- boot resilience -------------------------------------------------------
+# Incident (2026-08-03): a server reboot left Broadcast down. The unit
+# restarted compose every ~100ms while the network was still coming up,
+# burned systemd's default 5-starts-in-10s limit in 22 seconds, and landed
+# in a permanent 'failed' state ("Start request repeated too quickly").
+# These tests pin the unit settings that make boot self-healing.
+
+test_create_service_unit_survives_boot_races() {
+    sandbox_run "create_broadcast_service" >/dev/null
+
+    local unit
+    unit=$(cat "$UNIT_FILE")
+    assert_contains "$unit" "StartLimitIntervalSec=0" \
+        "the unit must never give up retrying (no start rate-limit lockout)"
+    assert_contains "$unit" "RestartSec=" \
+        "restarts must be spaced out, not the 100ms default that burns the rate limit"
+    assert_contains "$unit" "Wants=network-online.target" \
+        "the unit should pull in network-online at boot"
+    assert_contains "$unit" "network-online.target" \
+        "the unit must order itself after the network is up"
+    local after_line
+    after_line=$(echo "$unit" | /usr/bin/grep "^After=")
+    assert_contains "$after_line" "network-online.target" \
+        "After= must include network-online.target, not just docker.service"
+}
+
+# --- refresh_broadcast_service ---------------------------------------------
+# The unit is written once at install and nothing updated it on existing
+# servers — unit-template fixes never reached customers. refresh_broadcast_service
+# is the delivery mechanism: rewrite when stale, no-op when current.
+
+test_refresh_service_installs_a_missing_unit() {
+    rm -f "$UNIT_FILE"
+
+    local rc=0
+    sandbox_run "refresh_broadcast_service" >/dev/null || rc=$?
+    assert_equals "0" "$rc" "refresh should report a change when the unit was missing"
+
+    assert_file_exists "$UNIT_FILE" "a missing unit must be installed"
+    harness_assert_called "systemctl daemon-reload" \
+        "systemd must reload after the unit install"
+}
+
+test_refresh_service_rewrites_a_stale_unit() {
+    # The exact unit shipped to production before the incident
+    cat > "$UNIT_FILE" <<'STALE'
+[Unit]
+Description=Broadcast
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c "docker compose up"
+Restart=always
+User=broadcast
+
+[Install]
+WantedBy=multi-user.target
+STALE
+
+    local rc=0
+    sandbox_run "refresh_broadcast_service" >/dev/null || rc=$?
+    assert_equals "0" "$rc" "refresh should report a change for a stale unit"
+
+    assert_contains "$(cat "$UNIT_FILE")" "StartLimitIntervalSec=0" \
+        "a stale unit must be rewritten with the current template"
+    harness_assert_called "systemctl daemon-reload" \
+        "systemd must reload after the rewrite"
+}
+
+test_refresh_service_leaves_a_current_unit_alone() {
+    sandbox_run "create_broadcast_service" >/dev/null
+    : > "$SANDBOX_CALLS"
+
+    local rc=0
+    sandbox_run "refresh_broadcast_service" >/dev/null || rc=$?
+    assert_not_equals "0" "$rc" "refresh should signal no-change for a current unit"
+
+    harness_assert_not_called "systemctl daemon-reload" \
+        "an already-current unit must not trigger a reload"
+    harness_assert_not_called "tee" \
+        "an already-current unit must not be rewritten"
+}
+
 # --- post-upgrade-cleanup.sh ----------------------------------------------
 
 # Run the unmodified cleanup script with the sandbox mocks first on PATH.
@@ -152,6 +237,10 @@ run_system_service_tests() {
     run_test "test_create_service_reloads_and_enables" test_create_service_reloads_and_enables
     run_test "test_create_service_disables_an_active_service_first" test_create_service_disables_an_active_service_first
     run_test "test_create_service_skips_disable_when_not_active" test_create_service_skips_disable_when_not_active
+    run_test "test_create_service_unit_survives_boot_races" test_create_service_unit_survives_boot_races
+    run_test "test_refresh_service_installs_a_missing_unit" test_refresh_service_installs_a_missing_unit
+    run_test "test_refresh_service_rewrites_a_stale_unit" test_refresh_service_rewrites_a_stale_unit
+    run_test "test_refresh_service_leaves_a_current_unit_alone" test_refresh_service_leaves_a_current_unit_alone
     run_test "test_cleanup_prunes_when_all_containers_are_stable" test_cleanup_prunes_when_all_containers_are_stable
     run_test "test_cleanup_gives_up_when_a_container_never_runs" test_cleanup_gives_up_when_a_container_never_runs
     run_test "test_cleanup_waits_out_a_fresh_restart_then_prunes" test_cleanup_waits_out_a_fresh_restart_then_prunes

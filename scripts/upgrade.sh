@@ -75,6 +75,15 @@ function _upgrade_continue() {
     echo -e "\e[32mActive Record encryption keys added.\e[0m"
   fi
 
+  # The broadcast.service unit was historically written only at install, so
+  # template fixes (boot-resilience settings) never reached existing
+  # servers. Refresh it here — the service is stopped at this point, and
+  # the daemon-reload lands before the start below.
+  source /opt/broadcast/scripts/init-services.sh
+  if refresh_broadcast_service; then
+    echo -e "\e[33mbroadcast.service unit refreshed to the current template.\e[0m"
+  fi
+
   # Set docker image for target version
   echo -e "\e[33mSetting Docker image for version $target_version...\e[0m"
   set_docker_image "$target_version"

@@ -1,5 +1,39 @@
 # TODO
 
+## Boot resilience after reboot (2026-08-03, TDD)
+
+Incident: Simon rebooted the production server; broadcast.service failed to
+come up and stayed down until a manual start. Journal showed `docker compose
+up` exiting 18 eight times in 22s (registry unreachable while the network
+was still coming up — `pull_policy: always` forces a registry round-trip
+even with cached images), then systemd's "Start request repeated too
+quickly" lockout.
+
+Reproduced in tests first (all red before the fix, green after):
+- [x] Unit: broadcast.service template must carry RestartSec,
+      StartLimitIntervalSec=0, network-online ordering
+      (tests/unit/test_system_services.sh)
+- [x] Unit: compose files must not use `pull_policy: always`
+      (tests/unit/test_docker_references.sh)
+- [x] Unit: `_upgrade_continue` and `fix` refresh a stale installed unit —
+      the delivery path to existing customer servers
+      (tests/unit/test_upgrade_downgrade.sh, tests/unit/test_fix.sh)
+- [x] Smoke: Phase 5b under `--test-reboot` reboots the VM with the
+      registry blackholed via /etc/hosts and asserts the service comes up
+      from cached images with no rate-limit lockout
+      (tests/smoke/test_multipass_smoke.sh)
+
+Fixes shipped:
+- [x] `pull_policy: missing` in docker-compose.yml and
+      docker-compose.manual.yml (upgrades still pull explicitly)
+- [x] Hardened unit template + `refresh_broadcast_service` in
+      scripts/init-services.sh (single source of truth,
+      `broadcast_service_unit`)
+- [x] `_upgrade_continue` and `fix` deliver the refreshed unit to
+      existing installs (compose change arrives via the daily update pull;
+      the unit change needs an `upgrade` or `fix` run — or the next one
+      that happens naturally)
+
 ## Server health monitoring (SHIPPED 2026-08-02, live in production)
 
 End-to-end opt-in monitoring: `broadcast.sh health` (per-minute cron;
