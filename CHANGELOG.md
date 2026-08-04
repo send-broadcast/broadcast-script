@@ -40,6 +40,7 @@ release cadence begins, dated version sections will be promoted from this list.
 - Smoke test now runs against Ubuntu 24.04 and 26.04 by default, with a `--ubuntu VERSION` flag to filter to one and per-version pass/fail reporting in the summary.
 
 ### Changed
+- `./broadcast.sh fix` output is now grouped under section headers (Prerequisites, User & Access, Files & Permissions, Docker Image & Registry, System Services, Scheduled Maintenance, Application Configuration, Local Customizations) so the failing area stands out instead of one flat ~40-line list.
 - README now lists Ubuntu Server 26.04 alongside 24.04 as a supported platform (both are exercised by the VM smoke suite).
 - `./broadcast.sh validate_license` now prints an operator summary after validating: license name and status, buyer (masked email), masked key, server usage (e.g. "2 of 5 used"), this server's registration plus other registered domains, installed vs latest version with an upgrade hint, and whether health monitoring is enabled for this server. Older server responses without these fields simply skip the summary.
 - `./broadcast.sh monitor` now prints the metrics it wrote when run manually at a terminal, so an interactive run no longer looks like it did nothing. Cron runs remain silent, keeping the per-minute cron log clean.

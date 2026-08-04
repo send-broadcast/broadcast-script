@@ -441,6 +441,31 @@ test_fix_survives_a_failed_repair() {
     assert_contains "$output" "Done:" "the run must reach its summary despite the failure"
 }
 
+# The ~40 check lines are grouped under printed section headers so an
+# operator can find the failing area at a glance.
+test_fix_groups_checks_under_section_headers() {
+    local output
+    output=$(sandbox_run "fix" "$FIX_ENV") || true
+
+    local section prev_pos=0 pos
+    for section in "Prerequisites" "User & Access" "Files & Permissions" \
+        "Docker Image & Registry" "System Services" "Scheduled Maintenance" \
+        "Application Configuration" "Local Customizations"; do
+        pos=$(echo "$output" | /usr/bin/grep -n "$section" | head -1 | cut -d: -f1)
+        if [ -z "$pos" ]; then
+            echo -e "${RED}Assertion failed: section header '$section' missing from fix output${NC}"
+            TEST_FAILED=true
+            return 1
+        fi
+        if [ "$pos" -le "$prev_pos" ]; then
+            echo -e "${RED}Assertion failed: section '$section' out of order (line $pos <= $prev_pos)${NC}"
+            TEST_FAILED=true
+            return 1
+        fi
+        prev_pos=$pos
+    done
+}
+
 # A hand-edited tracked file blocks every git pull (2026-08-04 incident).
 # fix must never discard customer changes — it reports the files as
 # unfixable and points at the supported override path.
@@ -527,6 +552,7 @@ run_fix_tests() {
     run_test "test_fix_survives_a_failed_repair" test_fix_survives_a_failed_repair
     run_test "test_fix_reports_clean_on_healthy_system" test_fix_reports_clean_on_healthy_system
     run_test "test_fix_flags_local_modifications_with_override_guidance" test_fix_flags_local_modifications_with_override_guidance
+    run_test "test_fix_groups_checks_under_section_headers" test_fix_groups_checks_under_section_headers
 
     local result
     print_test_summary

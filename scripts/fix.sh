@@ -31,6 +31,13 @@ function fix_ok() {
   echo -e "ok: $1"
 }
 
+# Section header: groups the ~40 check lines into scannable blocks so an
+# operator can find the failing area at a glance.
+function fix_section() {
+  echo
+  echo -e "\e[1m$1\e[0m"
+}
+
 function fix_did() {
   echo -e "\e[33mfixed: $1\e[0m"
   FIX_REPAIRED=$((FIX_REPAIRED + 1))
@@ -46,9 +53,9 @@ function fix() {
   FIX_FAILED=0
 
   echo -e "\e[33mChecking and repairing the Broadcast installation...\e[0m"
-  echo
 
   # --- Unfixable prerequisites: converge cannot replace install ---------
+  fix_section "Prerequisites"
   if fix_has_command docker; then
     fix_ok "docker is installed"
   else
@@ -83,6 +90,7 @@ function fix() {
   fi
 
   # --- broadcast user and access ----------------------------------------
+  fix_section "User & Access"
   if id broadcast >/dev/null 2>&1; then
     fix_ok "broadcast user exists"
   else
@@ -110,6 +118,7 @@ function fix() {
   fi
 
   # --- Directory skeleton ------------------------------------------------
+  fix_section "Files & Permissions"
   local dir
   for dir in app/storage app/uploads app/triggers app/monitor db/backups db/init-scripts logs/cron ssl; do
     if [ -d "/opt/broadcast/$dir" ]; then
@@ -159,6 +168,7 @@ function fix() {
 
   # --- .image: broadcast.service sources it before compose up; without it
   # the stack cannot start at all
+  fix_section "Docker Image & Registry"
   if [ -f /opt/broadcast/.image ]; then
     fix_ok ".image present (existing pin preserved)"
   else
@@ -195,6 +205,7 @@ function fix() {
   fi
 
   # --- systemd units: installed, enabled, running ------------------------
+  fix_section "System Services"
   local units_changed=false
 
   # Existence is not enough: a unit left over from an older install may
@@ -275,6 +286,7 @@ function fix() {
   fi
 
   # --- Logrotate: without it log growth is unbounded ---------------------
+  fix_section "Scheduled Maintenance"
   if [ -f /etc/logrotate.d/broadcast ]; then
     fix_ok "logrotate config present"
   else
@@ -309,6 +321,7 @@ LOGROTATE
   done
 
   # --- app/.env essentials -----------------------------------------------
+  fix_section "Application Configuration"
   if [ ! -f /opt/broadcast/app/.env ]; then
     fix_fail "app/.env is missing — the Rails environment was never created; run ./broadcast.sh install"
   else
@@ -362,6 +375,7 @@ LOGROTATE
   # A hand-edited tracked file blocks every git pull (nightly updates fail
   # silently, upgrades abort — 2026-08-04 incident). fix will not discard
   # customer changes; it names them and points at the supported path.
+  fix_section "Local Customizations"
   local dirty_tree
   dirty_tree=$(git -C /opt/broadcast status --porcelain --untracked-files=no 2>/dev/null || true)
   if [ -z "$dirty_tree" ]; then
