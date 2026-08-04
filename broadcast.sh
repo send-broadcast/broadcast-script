@@ -62,6 +62,8 @@ function display_help() {
   echo "  validate_license         Validate the license for Broadcast"
   echo "  change_installation_domain Change the primary installation domain"
   echo "  generate_encryption_keys Generate Active Record encryption keys"
+  echo
+  echo "Full documentation: https://sendbroadcast.net/docs/cli-reference"
 }
 
 function set_safe_directory() {

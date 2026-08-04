@@ -20,6 +20,9 @@ rm -rf /opt/broadcast && git clone https://github.com/send-broadcast/broadcast-s
 
 ## Commands
 
+Full documentation for every command is at
+[sendbroadcast.net/docs/cli-reference](https://sendbroadcast.net/docs/cli-reference).
+
 All commands are run as root from `/opt/broadcast`:
 
 ```bash
