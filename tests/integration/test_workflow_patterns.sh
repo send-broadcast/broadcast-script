@@ -24,14 +24,16 @@ teardown_sandbox() {
 
 # --- upgrade entry sequence ----------------------------------------------
 
-test_upgrade_stops_updates_then_reexecs() {
+# Update runs BEFORE the stop (2026-08-04 incident: a failed git pull after
+# the stop left the site down) — mirrors the unit-level order test.
+test_upgrade_updates_stops_then_reexecs() {
     local rc=0
     sandbox_run "upgrade" >/dev/null || rc=$?
     assert_equals "0" "$rc" "upgrade entry should succeed"
 
     harness_assert_call_order \
-        "systemctl stop broadcast" \
         "broadcast.sh update" \
+        "systemctl stop broadcast" \
         "broadcast.sh _upgrade_continue"
 }
 
@@ -153,6 +155,12 @@ test_backup_database_creates_versioned_archive_with_checksum() {
     assert_contains "$(cat "$dump")" "FAKE PG DUMP PAYLOAD" "dump should hold the pg_dump output"
     rm -rf "$work"
 
+    # The dump must run WITHOUT a TTY (-T): an interactive run otherwise
+    # pulls binary dump bytes through a pty, corrupting the backup — and the
+    # checksum sidecar is computed after the corruption, so it cannot catch it.
+    harness_assert_called "docker compose exec -T postgres pg_dump" \
+        "pg_dump must run with -T so interactive backups are not TTY-corrupted"
+
     # The archive is copied into app storage for the Rails app to serve
     local staged
     staged=$(ls "$SANDBOX_ROOT/app/storage/"broadcast-backup-v2.1.0-*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
@@ -222,7 +230,7 @@ run_workflow_tests() {
     TEST_SETUP_FUNCTION="setup_sandbox"
     TEST_TEARDOWN_FUNCTION="teardown_sandbox"
 
-    run_test "test_upgrade_stops_updates_then_reexecs" test_upgrade_stops_updates_then_reexecs
+    run_test "test_upgrade_updates_stops_then_reexecs" test_upgrade_updates_stops_then_reexecs
     run_test "test_upgrade_forwards_target_version_through_reexec" test_upgrade_forwards_target_version_through_reexec
     run_test "test_trigger_upgrade_with_valid_version" test_trigger_upgrade_with_valid_version
     run_test "test_trigger_upgrade_falls_back_on_invalid_version" test_trigger_upgrade_falls_back_on_invalid_version

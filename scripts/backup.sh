@@ -23,9 +23,16 @@ function create_database_backup_file() {
   
   backup_file_name="broadcast-backup-v${current_version}-$timestamp"
 
-  # We only backup the primary database. The queue and cache databases are ephemeral and considered unimportant for restoration.
+  echo -e "\e[33mDumping the primary database. This can take several minutes on large databases;\e[0m"
+  echo -e "\e[33mprogress can be watched from another terminal with: ls -lh /opt/broadcast/db/backups/temp-backup.dump\e[0m"
+
+  # We only backup the primary database. The queue and cache databases are
+  # ephemeral and considered unimportant for restoration. -T disables TTY
+  # allocation: an interactive run otherwise pulls the binary dump through a
+  # pty, corrupting it — and the checksum sidecar is computed after the
+  # corruption, so restore's integrity check cannot catch it.
   cd /opt/broadcast
-  sudo docker compose exec postgres pg_dump -U broadcast -Fc broadcast_primary_production > /opt/broadcast/db/backups/temp-backup.dump
+  sudo docker compose exec -T postgres pg_dump -U broadcast -Fc broadcast_primary_production > /opt/broadcast/db/backups/temp-backup.dump
   sudo mv /opt/broadcast/db/backups/temp-backup.dump /opt/broadcast/db/backups/$backup_file_name.dump
 
   # Create VERSION file with backup metadata
