@@ -1117,7 +1117,11 @@ test_upgrade_dirty_tree_protection() {
     fi
 
     log_info "Applying the documented remediation (override file + discard edit)..."
-    vm_exec_root "printf \"services:\\n  app:\\n    environment:\\n      SMOKE_OVERRIDE: applied\\n\" > /opt/broadcast/docker-compose.override.yml"
+    # The override is exactly what the docs tell the firstborngroup customer
+    # to write: replace the postgres port binding via the !override tag
+    # (Compose v2.24+; without it lists merge additively and BOTH bindings
+    # would exist). The app env var rides along to cover plain merging too.
+    vm_exec_root "printf \"services:\\n  app:\\n    environment:\\n      SMOKE_OVERRIDE: applied\\n  postgres:\\n    ports: !override\\n      - 127.0.0.1:15432:5432\\n\" > /opt/broadcast/docker-compose.override.yml"
     vm_exec_root "cd /opt/broadcast && git checkout -- docker-compose.yml"
 
     log_test "update succeeds again once the tree is clean"
@@ -1136,6 +1140,23 @@ test_upgrade_dirty_tree_protection() {
         log_success "override merged into the running app container"
     else
         log_fail "override file ignored — the unit is still pinning the compose file"
+    fi
+
+    log_test "!override replaces the postgres port binding (the documented customer method)"
+    if wait_for_check "postgres bound to the override port" \
+        "docker port postgres | grep -q 127.0.0.1:15432" 12 5; then
+        log_success "postgres serving on the override binding 127.0.0.1:15432"
+    else
+        log_fail "override port binding not applied to postgres"
+    fi
+
+    log_test "the stock 5432 binding is gone (list REPLACED, not additively merged)"
+    local binding_count
+    binding_count=$(vm_exec_root "docker port postgres" | /usr/bin/grep -c "127.0.0.1" || true)
+    if [ "$binding_count" = "1" ]; then
+        log_success "exactly one host binding — !override replaced the stock entry"
+    else
+        log_fail "expected 1 host binding, found ${binding_count} — lists merged additively (missing/broken !override handling)"
     fi
 
     run_health_checks "Phase 7c (customized install)"
