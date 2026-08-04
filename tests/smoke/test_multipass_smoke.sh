@@ -41,6 +41,7 @@ FLAG_NO_CLEANUP=false
 FLAG_TEST_REBOOT=false
 FLAG_TEST_UPGRADE=false
 FLAG_TEST_REAL_UPGRADE=false
+FLAG_TEST_UPGRADE_FAILSAFE=false
 FLAG_VERBOSE=false
 FLAG_LOCAL=false
 FROM_REF=""
@@ -992,6 +993,71 @@ test_real_upgrade() {
     _test_streaming_lifecycle
 }
 
+# Phase 7b: the 2026-08-04 customer report, reproduced for real — an upgrade
+# that fails mid-window. broadcast.sh runs under `set -e`, and everything
+# between `systemctl stop broadcast` and the final `systemctl start` in
+# _upgrade_continue is a window where any failure aborts the script with the
+# service still stopped: the site stays DOWN until a human runs restart,
+# which is exactly what the customer reported. The registry is blackholed
+# (same /etc/hosts technique as Phase 5b) so the upgrade's explicit
+# `docker compose pull` fails inside that window.
+#
+# The assertions encode the REQUIRED behaviour — a failed upgrade must
+# report failure AND leave the previously-installed version serving — so
+# this phase runs RED against current code until the fail-safe ships.
+# A plain (latest-tag) upgrade is used deliberately: the old image is still
+# in the local cache under the same tag, so a fail-safe `systemctl start`
+# can succeed without registry access (pull_policy: missing). Rolling back
+# .image for failed VERSION-SPECIFIC upgrades is a further requirement
+# tracked in SPRINT.md item 3, not asserted here.
+test_upgrade_failure_failsafe() {
+    log_info "=== Phase 7b: Upgrade failure mid-window (fail-safe) ==="
+
+    local registry_host="gitea.hostedapp.org"
+
+    log_test "stack is healthy before the failed-upgrade attempt"
+    if vm_exec_root "systemctl is-active --quiet broadcast.service"; then
+        log_success "broadcast.service active pre-upgrade"
+    else
+        log_fail "broadcast.service not active before the phase even starts"
+    fi
+
+    log_info "Blackholing ${registry_host} in /etc/hosts..."
+    vm_exec_root "cp /etc/hosts /etc/hosts.smoke-backup && printf \"127.0.0.1 ${registry_host}\n\" >> /etc/hosts"
+
+    log_test "broadcast.sh upgrade reports failure when the image pull fails"
+    if vm_exec_root "cd /opt/broadcast && ./broadcast.sh upgrade"; then
+        log_fail "upgrade exited 0 despite the registry being unreachable"
+    else
+        log_success "upgrade exited nonzero"
+    fi
+
+    log_test "failed upgrade leaves broadcast.service running (fail-safe)"
+    if wait_for_check "broadcast.service active" \
+        "systemctl is-active --quiet broadcast.service" 12 5; then
+        log_success "service still serving after the failed upgrade"
+    else
+        log_fail "service left STOPPED by the failed upgrade — the customer-reported outage"
+    fi
+
+    log_test "failed upgrade leaves the app container running (old version)"
+    if wait_for_check "app container running" \
+        "docker inspect -f {{.State.Status}} app | grep -q running" 12 5; then
+        log_success "app container running from the cached image"
+    else
+        log_fail "app container not running after the failed upgrade"
+    fi
+
+    log_info "Restoring /etc/hosts..."
+    vm_exec_root "mv /etc/hosts.smoke-backup /etc/hosts"
+
+    # Recover the VM for the phases that follow — the same manual step the
+    # customer had to run.
+    log_info "Recovering with a manual broadcast.sh restart..."
+    vm_exec_root "cd /opt/broadcast && ./broadcast.sh restart" || true
+    run_health_checks "Phase 7b (post-recovery)"
+}
+
 # Shared streaming lifecycle assertions: start via trigger, survive container
 # recreation (reattach), and stop on trigger removal. Used by both the
 # behavioural (--test-upgrade) and genuine-upgrade (--test-real-upgrade) phases.
@@ -1145,6 +1211,9 @@ parse_args() {
             --test-real-upgrade)
                 FLAG_TEST_REAL_UPGRADE=true
                 ;;
+            --test-upgrade-failsafe)
+                FLAG_TEST_UPGRADE_FAILSAFE=true
+                ;;
             --from-ref)
                 shift
                 if [ $# -eq 0 ]; then
@@ -1181,6 +1250,7 @@ parse_args() {
                 echo "  --test-reboot     Also verify services survive a reboot (incl. a reboot with the registry unreachable)"
                 echo "  --test-upgrade    Also verify the log-streaming watcher restart + streaming survives container recreation"
                 echo "  --test-real-upgrade  Run a genuine 'broadcast.sh upgrade' (use with --from-ref to install an older rev first)"
+                echo "  --test-upgrade-failsafe  Fail an upgrade mid-window (registry blackholed) and require the old version to keep serving"
                 echo "  --from-ref REF    Reset /opt/broadcast to REF before install (remote mode), so an upgrade is genuine old->new"
                 echo "  --verbose         Show all command output"
                 echo "  --help            Show this help message"
@@ -1235,6 +1305,10 @@ run_for_version() {
 
     if [ "$FLAG_TEST_REAL_UPGRADE" = true ]; then
         test_real_upgrade
+    fi
+
+    if [ "$FLAG_TEST_UPGRADE_FAILSAFE" = true ]; then
+        test_upgrade_failure_failsafe
     fi
 
     # Always last: changes the installation domain and restarts the stack
