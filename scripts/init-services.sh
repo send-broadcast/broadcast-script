@@ -20,8 +20,11 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -c "set -a && . /opt/broadcast/.image && set +a && docker compose -f /opt/broadcast/docker-compose.yml up"
-ExecStop=/bin/bash -c "set -a && . /opt/broadcast/.image && set +a && docker compose -f /opt/broadcast/docker-compose.yml down"
+# No explicit -f: compose discovers docker-compose.yml via WorkingDirectory
+# and auto-merges docker-compose.override.yml — the supported path for
+# customer customizations (an explicit -f would silently ignore it).
+ExecStart=/bin/bash -c "set -a && . /opt/broadcast/.image && set +a && docker compose up"
+ExecStop=/bin/bash -c "set -a && . /opt/broadcast/.image && set +a && docker compose down"
 Restart=always
 RestartSec=5
 User=broadcast

@@ -274,15 +274,48 @@ function diagnose() {
   } > "$bundle/timeline.txt"
 
   # 16. Cron liveness: dead cron means no monitoring, no triggers, no
-  # updates — and nothing complains until the dashboard goes stale
+  # updates — and nothing complains until the dashboard goes stale.
+  # Heartbeat is app/monitor/system.json (rewritten every minute by the
+  # monitor cron). Log mtimes are NOT a liveness signal: successful cron
+  # runs emit no stdout, so their logs sit 0-byte with stale mtimes forever
+  # (false-positive WARN observed in a real customer bundle, 2026-08-04).
+  # The update/trigger log tails ride along because a silently failing
+  # nightly `git pull` was invisible in the bundle until it broke an
+  # upgrade (same incident).
   {
     ls -l /opt/broadcast/logs/cron/ 2>/dev/null || echo "no cron log directory"
-    if find /opt/broadcast/logs/cron -name "*.log" -mmin -10 2>/dev/null | grep -q .; then
-      echo "ok: cron jobs wrote logs within the last 10 minutes"
+    if find /opt/broadcast/app/monitor/system.json -mmin -10 2>/dev/null | grep -q .; then
+      echo "ok: monitor heartbeat (app/monitor/system.json) written within the last 10 minutes"
     else
-      echo "WARN: no cron log activity in the last 10 minutes — the monitor/trigger cron jobs may be dead"
+      echo "WARN: no monitor heartbeat in the last 10 minutes — cron may be dead (app/monitor/system.json stale or missing)"
     fi
+    echo
+    echo "--- update.log tail (nightly script update) ---"
+    tail -20 /opt/broadcast/logs/cron/update.log 2>/dev/null || echo "(no update.log)"
+    echo
+    echo "--- trigger.log tail (dashboard-triggered operations) ---"
+    tail -20 /opt/broadcast/logs/cron/trigger.log 2>/dev/null || echo "(no trigger.log)"
   } > "$bundle/cron.txt"
+
+  # 16b. Local customizations: a hand-edited tracked file blocks every git
+  # pull — nightly updates fail silently and upgrades abort (2026-08-04
+  # incident, invisible in the bundle until this collector). The override
+  # file is the supported customization path, so its contents matter to
+  # support.
+  {
+    echo "--- git status (tracked files; any entry here blocks script updates) ---"
+    git -C /opt/broadcast status --porcelain --untracked-files=no 2>&1 || true
+    echo
+    echo "--- installed scripts revision ---"
+    git -C /opt/broadcast log -1 --oneline 2>&1 || true
+    echo
+    if [ -f /opt/broadcast/docker-compose.override.yml ]; then
+      echo "--- docker-compose.override.yml (customer customizations, applied on top of stock) ---"
+      cat /opt/broadcast/docker-compose.override.yml
+    else
+      echo "no docker-compose.override.yml (stock compose configuration)"
+    fi
+  } > "$bundle/customizations.txt"
 
   # 17. Outbound network: blocked egress fails silently, and cloud hosts
   # commonly block SMTP ports by default
@@ -380,6 +413,9 @@ function diagnose() {
   echo
   echo "--- Cron liveness ---"
   cat "$bundle/cron.txt" 2>/dev/null || true
+  echo
+  echo "--- Local customizations (dirty tree blocks updates; override file) ---"
+  cat "$bundle/customizations.txt" 2>/dev/null || true
   echo
   echo "--- Disk attribution ---"
   cat "$bundle/storage.txt" 2>/dev/null || true

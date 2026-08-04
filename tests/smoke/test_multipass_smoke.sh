@@ -41,6 +41,7 @@ FLAG_NO_CLEANUP=false
 FLAG_TEST_REBOOT=false
 FLAG_TEST_UPGRADE=false
 FLAG_TEST_REAL_UPGRADE=false
+FLAG_TEST_UPGRADE_FAILSAFE=false
 FLAG_VERBOSE=false
 FLAG_LOCAL=false
 FROM_REF=""
@@ -356,6 +357,22 @@ prepare_installation() {
 
     # Fix permissions on db/init-scripts so postgres container (uid 70) can read them
     vm_exec_root "chmod -R o+rX /opt/broadcast/db/init-scripts"
+
+    # Local mode: the copied working tree has no usable git upstream, so
+    # the `git pull` inside `broadcast.sh update` (and therefore inside
+    # upgrade) would fail before reaching anything else. Rebuild the repo
+    # fresh on the VM and give it a real local bare-clone upstream, so
+    # `git pull` is a clean "Already up to date" no-op — this keeps the
+    # upgrade-path phases runnable against uncommitted local code.
+    # MUST run LAST, after every tracked-file mutation above (the
+    # install.sh reboot patch!) — anything modified after this commit
+    # leaves the tree dirty and update's dirty-tree protection refuses to
+    # pull, silently degrading the upgrade-path phases.
+    if [ "$FLAG_LOCAL" = true ]; then
+        log_info "Setting up a local git upstream for the prepared tree..."
+        vm_exec_root "command -v git >/dev/null || apt-get install -y -qq git"
+        vm_exec_root "cd /opt/broadcast && rm -rf .git && git init -q -b smoke-local && git add -A && git -c user.email=smoke@test.local -c user.name=smoke commit -qm smoke-local-tree && git clone --bare -q . /opt/broadcast-upstream.git && git remote add origin /opt/broadcast-upstream.git && git config branch.smoke-local.remote origin && git config branch.smoke-local.merge refs/heads/smoke-local && git fetch -q origin"
+    fi
 
     log_info "Installation prepared."
 }
@@ -992,6 +1009,138 @@ test_real_upgrade() {
     _test_streaming_lifecycle
 }
 
+# Phase 7b: the 2026-08-04 customer report, reproduced for real — an upgrade
+# that fails mid-window. broadcast.sh runs under `set -e`, and everything
+# between `systemctl stop broadcast` and the final `systemctl start` in
+# _upgrade_continue is a window where any failure aborts the script with the
+# service still stopped: the site stays DOWN until a human runs restart,
+# which is exactly what the customer reported. The registry is blackholed
+# (same /etc/hosts technique as Phase 5b) so the upgrade's explicit
+# `docker compose pull` fails inside that window.
+#
+# The assertions encode the REQUIRED behaviour — a failed upgrade must
+# report failure AND leave the previously-installed version serving — so
+# this phase runs RED against current code until the fail-safe ships.
+# A plain (latest-tag) upgrade is used deliberately: the old image is still
+# in the local cache under the same tag, so a fail-safe `systemctl start`
+# can succeed without registry access (pull_policy: missing). Rolling back
+# .image for failed VERSION-SPECIFIC upgrades is a further requirement
+# tracked in SPRINT.md item 3, not asserted here.
+test_upgrade_failure_failsafe() {
+    log_info "=== Phase 7b: Upgrade failure mid-window (fail-safe) ==="
+
+    local registry_host="gitea.hostedapp.org"
+
+    log_test "stack is healthy before the failed-upgrade attempt"
+    if vm_exec_root "systemctl is-active --quiet broadcast.service"; then
+        log_success "broadcast.service active pre-upgrade"
+    else
+        log_fail "broadcast.service not active before the phase even starts"
+    fi
+
+    log_info "Blackholing ${registry_host} in /etc/hosts..."
+    vm_exec_root "cp /etc/hosts /etc/hosts.smoke-backup && printf \"127.0.0.1 ${registry_host}\n\" >> /etc/hosts"
+
+    log_test "broadcast.sh upgrade reports failure when the image pull fails"
+    if vm_exec_root "cd /opt/broadcast && ./broadcast.sh upgrade"; then
+        log_fail "upgrade exited 0 despite the registry being unreachable"
+    else
+        log_success "upgrade exited nonzero"
+    fi
+
+    log_test "failed upgrade leaves broadcast.service running (fail-safe)"
+    if wait_for_check "broadcast.service active" \
+        "systemctl is-active --quiet broadcast.service" 12 5; then
+        log_success "service still serving after the failed upgrade"
+    else
+        log_fail "service left STOPPED by the failed upgrade — the customer-reported outage"
+    fi
+
+    log_test "failed upgrade leaves the app container running (old version)"
+    if wait_for_check "app container running" \
+        "docker inspect -f {{.State.Status}} app | grep -q running" 12 5; then
+        log_success "app container running from the cached image"
+    else
+        log_fail "app container not running after the failed upgrade"
+    fi
+
+    log_info "Restoring /etc/hosts..."
+    vm_exec_root "mv /etc/hosts.smoke-backup /etc/hosts"
+
+    # Recover the VM for the phases that follow — the same manual step the
+    # customer had to run.
+    log_info "Recovering with a manual broadcast.sh restart..."
+    vm_exec_root "cd /opt/broadcast && ./broadcast.sh restart" || true
+    run_health_checks "Phase 7b (post-recovery)"
+}
+
+# Phase 7c: the 2026-08-04 firstborngroup incident, end to end — a
+# hand-edited docker-compose.yml. The dirty tree must abort the upgrade
+# BEFORE the service is stopped (update-before-stop reorder), with a
+# message pointing at docker-compose.override.yml; the documented
+# remediation (discard the edit, move it into the override file) must then
+# actually work, including the override being honored by the systemd unit
+# (which previously pinned the compose file with -f, silently ignoring
+# overrides). The override file deliberately stays in place afterwards, so
+# every later phase doubles as coverage that a customized install stays
+# healthy.
+test_upgrade_dirty_tree_protection() {
+    log_info "=== Phase 7c: Dirty-tree upgrade protection + override support ==="
+
+    log_info "Hand-editing docker-compose.yml (simulating the customer)..."
+    vm_exec_root "echo \"# smoke customer edit\" >> /opt/broadcast/docker-compose.yml"
+
+    local out rc=0
+    out=$(vm_exec_root "cd /opt/broadcast && ./broadcast.sh upgrade" 2>&1) || rc=$?
+
+    log_test "upgrade refuses a dirty tree (nonzero exit)"
+    if [ "$rc" -ne 0 ]; then
+        log_success "upgrade exited nonzero on the dirty tree"
+    else
+        log_fail "upgrade exited 0 despite local modifications"
+    fi
+
+    log_test "refusal names the file and points at the override path"
+    if echo "$out" | grep -q "docker-compose.override.yml" \
+        && echo "$out" | grep -q "docker-compose.yml"; then
+        log_success "clear guidance printed (override file named)"
+    else
+        log_fail "guidance missing from the refusal output: $out"
+    fi
+
+    log_test "the dirty-tree failure never touched the running service"
+    if vm_exec_root "systemctl is-active --quiet broadcast.service" \
+        && vm_exec_root "docker inspect -f {{.State.Status}} app | grep -q running"; then
+        log_success "service and app container stayed up throughout"
+    else
+        log_fail "service went down on a failure that happens before the stop"
+    fi
+
+    log_info "Applying the documented remediation (override file + discard edit)..."
+    vm_exec_root "printf \"services:\\n  app:\\n    environment:\\n      SMOKE_OVERRIDE: applied\\n\" > /opt/broadcast/docker-compose.override.yml"
+    vm_exec_root "cd /opt/broadcast && git checkout -- docker-compose.yml"
+
+    log_test "update succeeds again once the tree is clean"
+    if vm_exec_root "cd /opt/broadcast && ./broadcast.sh update"; then
+        log_success "script update flows again after remediation"
+    else
+        log_fail "update still failing after the documented remediation"
+    fi
+
+    log_info "Restarting to apply the override..."
+    vm_exec_root "cd /opt/broadcast && ./broadcast.sh restart" || true
+
+    log_test "docker-compose.override.yml is honored by the systemd unit"
+    if wait_for_check "override env var present in app container" \
+        "docker exec app printenv SMOKE_OVERRIDE | grep -q applied" 12 5; then
+        log_success "override merged into the running app container"
+    else
+        log_fail "override file ignored — the unit is still pinning the compose file"
+    fi
+
+    run_health_checks "Phase 7c (customized install)"
+}
+
 # Shared streaming lifecycle assertions: start via trigger, survive container
 # recreation (reattach), and stop on trigger removal. Used by both the
 # behavioural (--test-upgrade) and genuine-upgrade (--test-real-upgrade) phases.
@@ -1145,6 +1294,9 @@ parse_args() {
             --test-real-upgrade)
                 FLAG_TEST_REAL_UPGRADE=true
                 ;;
+            --test-upgrade-failsafe)
+                FLAG_TEST_UPGRADE_FAILSAFE=true
+                ;;
             --from-ref)
                 shift
                 if [ $# -eq 0 ]; then
@@ -1181,6 +1333,7 @@ parse_args() {
                 echo "  --test-reboot     Also verify services survive a reboot (incl. a reboot with the registry unreachable)"
                 echo "  --test-upgrade    Also verify the log-streaming watcher restart + streaming survives container recreation"
                 echo "  --test-real-upgrade  Run a genuine 'broadcast.sh upgrade' (use with --from-ref to install an older rev first)"
+                echo "  --test-upgrade-failsafe  Upgrade-hardening phases: failed-upgrade fail-safe (7b) and dirty-tree protection + compose override support (7c)"
                 echo "  --from-ref REF    Reset /opt/broadcast to REF before install (remote mode), so an upgrade is genuine old->new"
                 echo "  --verbose         Show all command output"
                 echo "  --help            Show this help message"
@@ -1235,6 +1388,11 @@ run_for_version() {
 
     if [ "$FLAG_TEST_REAL_UPGRADE" = true ]; then
         test_real_upgrade
+    fi
+
+    if [ "$FLAG_TEST_UPGRADE_FAILSAFE" = true ]; then
+        test_upgrade_failure_failsafe
+        test_upgrade_dirty_tree_protection
     fi
 
     # Always last: changes the installation domain and restarts the stack
