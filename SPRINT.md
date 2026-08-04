@@ -39,22 +39,34 @@ Settled design, for when it's picked up:
 
 ## 3. Upgrade hardening: fail-safe, explicit migrations, readiness check
 
-Motivated by a customer report (Bilal, 2026-08-04): servers appeared down
-after upgrading to v2.25.0 until a manual `./broadcast.sh restart`. Two
-suspected mechanisms, neither confirmed from their servers yet (diagnose
-bundle requested): the pre-fix registry race at startup (shipped 2026-08-03
-in the boot-resilience commit), and large migrations making the app look
-hard-down while `db:prepare` runs. Regardless of which one it was, the
-upgrade path has structural gaps this item closes. TDD like items 1–2.
+Motivated by a customer report (Bilal Iftikhar, firstborngroup, 2026-08-04):
+servers appeared down after upgrading to v2.25.0 until a manual
+`./broadcast.sh restart`. ROOT CAUSE CONFIRMED from their diagnose bundle:
+a hand-edited docker-compose.yml (postgres port binding) made the upgrade's
+`git pull` abort AFTER the `systemctl stop` — the site went down with the
+version unchanged, and the same dirty tree had been silently killing their
+nightly script update for weeks (stuck at 9f9b148). The registry-race and
+big-migration theories were plausible but wrong for this incident; the
+structural stop→start window gap was real either way.
 
-Design, settled 2026-08-04:
-- **Fail-safe trap**: any error between `systemctl stop` (upgrade.sh:9)
-  and `systemctl start` (upgrade.sh:96) currently strands the server down
-  under `set -e`. Trap errors and attempt `systemctl start broadcast` so a
-  failed upgrade leaves the OLD version serving. The trap must exist in
-  both `upgrade()` and `_upgrade_continue()` — the `exec` between them
-  wipes the first — and must still exit nonzero and report loudly, never
-  masking the failure. Same treatment for downgrade.
+SHIPPED on upgrade-hardening (2026-08-04, TDD):
+- Fail-safe EXIT trap in upgrade/downgrade — a mid-window failure rolls
+  .image back and restarts the previous version from the local image
+  cache; exits nonzero with the original error. (smoke Phase 7b red→green)
+- Update-before-stop reorder — a git failure now aborts with the site
+  still serving.
+- Dirty-tree detection in update — refuses the pull, names the modified
+  files, points at docker-compose.override.yml.
+- Compose override support — the systemd unit no longer pins the compose
+  file with -f, so docker-compose.override.yml (overlay semantics, Simon's
+  explicit decision — never full-file replacement) is honored; documented
+  in the README incl. the `!override` list caveat; gitignored; reported by
+  diagnose/fix. (smoke Phase 7c: full incident + remediation end-to-end)
+- Diagnose gaps closed: git status + override contents + update/trigger
+  log tails captured; cron liveness keyed off the monitor heartbeat
+  (system.json mtime) instead of the false-positive log mtimes.
+
+Still open from the original design (not needed for this incident):
 - **Explicit migration step**: after the pull, before start, run
   `docker compose run --rm app bin/rails db:prepare` (as broadcast, with
   .image sourced). Upgrade then blocks on and surfaces migration failures;
@@ -67,7 +79,6 @@ Design, settled 2026-08-04:
   on large databases"); print success only when the site actually serves.
   On timeout, print next steps (`logs app`, `diagnose`) instead of the
   current unconditional success message that fires while the site is down.
-- Tests: unit in test_upgrade_downgrade.sh (trap presence + sequencing,
-  migrate-step ordering, readiness gate before the success message); smoke
-  phase that kills an upgrade mid-window and asserts the service comes
-  back on the old version.
+- Tests when picked up: unit for migrate-step ordering and the readiness
+  gate before the success message; smoke coverage of a slow-migration
+  upgrade (the readiness poll must keep reporting progress, not time out).

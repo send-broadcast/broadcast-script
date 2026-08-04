@@ -63,6 +63,42 @@ cd /opt/broadcast && ./broadcast.sh <command>
 - **`generate_encryption_keys`** — Generate the Active Record encryption keys in `app/.env` if they are missing (normally created during install; needed for encrypted fields such as API keys).
 - **`help`** — Show the list of available commands.
 
+## Customizing the Docker services
+
+Never edit `docker-compose.yml` (or any other Broadcast file) directly —
+local modifications block the nightly script updates and abort upgrades.
+The supported path is a Docker Compose override file:
+
+```bash
+sudo nano /opt/broadcast/docker-compose.override.yml
+```
+
+Compose merges this file **on top of** the stock `docker-compose.yml`
+automatically whenever the services start. You only express your delta, so
+you keep receiving every stock configuration change Broadcast ships. For
+example, to expose Postgres on a specific interface:
+
+```yaml
+services:
+  postgres:
+    ports: !override
+      - "127.0.0.1:5432:5432"
+```
+
+Notes:
+
+- Changes take effect on the next restart: `./broadcast.sh restart`.
+- Replacing an existing **list** entry (like a port binding) needs the
+  `!override` YAML tag shown above (Docker Compose v2.24+) — without it,
+  lists merge additively and you would get both the stock entry and yours.
+- Scalar values (an environment variable, a memory limit) replace the
+  stock value directly, no tag needed.
+- For remote database access, prefer an SSH tunnel over exposing 5432
+  publicly: `ssh -L 5432:localhost:5432 user@your-server`.
+- If you have already edited `docker-compose.yml`, move your changes into
+  the override file, then discard the edits with
+  `git -C /opt/broadcast checkout -- .` so updates flow again.
+
 ## Troubleshooting
 
 If your installation is misbehaving (site down, errors, slow responses), run:

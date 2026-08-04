@@ -1,5 +1,62 @@
+# Fail-safe for the stop->start window. broadcast.sh runs under `set -e`,
+# so any failure between `systemctl stop broadcast` and the final
+# `systemctl start` used to abort the script with the service still
+# stopped — a customer-facing outage until a human ran restart
+# (2026-08-04 report; reproduced by smoke Phase 7b). The trap converts a
+# failed upgrade/downgrade into "previous version still serving": roll the
+# image pin back to the version that is already in the local cache, start
+# the service, and exit with the original failure code. It must be armed
+# separately on both sides of the `exec` re-entry — the process
+# replacement discards any armed trap.
+_FAILSAFE_PREV_VERSION=""
+_FAILSAFE_OPERATION=""
+
+_arm_service_failsafe() {
+  _FAILSAFE_OPERATION="$1"
+  _FAILSAFE_PREV_VERSION="$(get_current_version)"
+  trap _run_service_failsafe EXIT
+}
+
+_disarm_service_failsafe() {
+  trap - EXIT
+}
+
+_run_service_failsafe() {
+  local exit_code=$?
+  trap - EXIT
+  if [ "$exit_code" -eq 0 ]; then
+    return 0
+  fi
+
+  echo -e "\e[31m${_FAILSAFE_OPERATION} failed (exit ${exit_code}). Restarting the previously installed version so the site stays up...\e[0m"
+
+  # Point .image back at the version whose image is already in the local
+  # cache; `pull_policy: missing` then lets the start below succeed with
+  # no registry access.
+  if [ -n "${_FAILSAFE_PREV_VERSION:-}" ] && [ "$_FAILSAFE_PREV_VERSION" != "unknown" ]; then
+    set_docker_image "$_FAILSAFE_PREV_VERSION" || true
+  fi
+
+  if systemctl start broadcast; then
+    echo -e "\e[33mPrevious version restarted. ${_FAILSAFE_OPERATION} did NOT complete — review the error above and retry.\e[0m"
+  else
+    echo -e "\e[31mFail-safe restart also failed. Run './broadcast.sh restart', then './broadcast.sh diagnose' if the system stays down.\e[0m"
+  fi
+
+  exit "$exit_code"
+}
+
 function upgrade() {
   local target_version="${1:-}"
+
+  # Update scripts BEFORE stopping the service: a failed git pull (dirty
+  # tree from a hand-edited file, unreachable GitHub) then aborts the
+  # upgrade with the site still serving — it took a customer's site down
+  # when this ran after the stop (2026-08-04).
+  echo -e "\e[33mUpdating Broadcast scripts...\e[0m"
+  /opt/broadcast/broadcast.sh update
+
+  _arm_service_failsafe "Upgrade"
 
   if [ -n "$target_version" ]; then
     echo -e "\e[33mStopping Broadcast service for version-specific upgrade to $target_version...\e[0m"
@@ -7,9 +64,6 @@ function upgrade() {
     echo -e "\e[33mStopping Broadcast service...\e[0m"
   fi
   systemctl stop broadcast
-
-  echo -e "\e[33mUpdating Broadcast scripts...\e[0m"
-  /opt/broadcast/broadcast.sh update
 
   # Re-exec with updated scripts to ensure new code runs
   echo -e "\e[33mReloading with updated scripts...\e[0m"
@@ -19,6 +73,11 @@ function upgrade() {
 function _upgrade_continue() {
   local target_version="${1:-}"
   local current_version=$(get_current_version)
+
+  # Re-arm after the exec re-entry: the service is stopped and stays
+  # stopped until the start below, so every failure in between needs the
+  # fail-safe.
+  _arm_service_failsafe "Upgrade"
 
   if [ -z "$target_version" ]; then
     target_version="latest"
@@ -94,6 +153,9 @@ function _upgrade_continue() {
 
   echo -e "\e[33mRestarting Broadcast service...\e[0m"
   systemctl start broadcast
+
+  # The service is running again — the window the fail-safe guards is closed.
+  _disarm_service_failsafe
 
   # Schedule post-upgrade image cleanup (runs after containers stabilize)
   echo -e "\e[33mScheduling post-upgrade Docker image cleanup...\e[0m"

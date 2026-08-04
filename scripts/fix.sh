@@ -358,6 +358,21 @@ LOGROTATE
     fi
   fi
 
+  # --- Local customizations: report, never touch --------------------------
+  # A hand-edited tracked file blocks every git pull (nightly updates fail
+  # silently, upgrades abort — 2026-08-04 incident). fix will not discard
+  # customer changes; it names them and points at the supported path.
+  local dirty_tree
+  dirty_tree=$(git -C /opt/broadcast status --porcelain --untracked-files=no 2>/dev/null || true)
+  if [ -z "$dirty_tree" ]; then
+    fix_ok "no local modifications to Broadcast's files"
+  else
+    fix_fail "local modifications block script updates: $(echo "$dirty_tree" | tr '\n' ' ') — move compose customizations into /opt/broadcast/docker-compose.override.yml, then discard the edits with: git -C /opt/broadcast checkout -- ."
+  fi
+  if [ -f /opt/broadcast/docker-compose.override.yml ]; then
+    fix_ok "docker-compose.override.yml present (customizations applied on top of the stock compose file)"
+  fi
+
   # --- Summary -----------------------------------------------------------
   echo
   if [ "$FIX_FAILED" -gt 0 ]; then

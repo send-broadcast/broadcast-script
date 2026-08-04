@@ -47,15 +47,18 @@ test_downgrade_rejects_invalid_version_format() {
     harness_assert_not_called "systemctl" "services must not be touched on a rejected downgrade"
 }
 
-test_downgrade_stops_updates_then_reexecs() {
+# The script update (git pull) must run BEFORE the stop: a git failure —
+# dirty tree from a hand-edited compose file (the 2026-08-04 firstborngroup
+# incident), unreachable GitHub — must never take the site down.
+test_downgrade_updates_before_stopping() {
     harness_stub_broadcast_sh
     local rc=0
     sandbox_run "downgrade 1.5.0" >/dev/null || rc=$?
     assert_equals "0" "$rc" "a valid downgrade should proceed"
 
     harness_assert_call_order \
-        "systemctl stop broadcast" \
         "broadcast.sh update" \
+        "systemctl stop broadcast" \
         "broadcast.sh _downgrade_continue 1.5.0"
 }
 
@@ -246,6 +249,111 @@ test_downgrade_continue_full_sequence() {
         "version history should record the downgrade"
 }
 
+# --- update: dirty-tree protection -----------------------------------------
+# 2026-08-04 (firstborngroup): a hand-edited docker-compose.yml made every
+# nightly `git pull` fail silently for weeks and killed the upgrade. update
+# must detect local modifications BEFORE pulling and say what to do instead.
+
+test_update_refuses_a_dirty_tree_with_guidance() {
+    harness_mock git 'case "$*" in
+  *"status --porcelain"*) echo " M docker-compose.yml" ;;
+esac
+exit 0'
+
+    local rc=0 output
+    output=$(sandbox_run "update") || rc=$?
+    assert_not_equals "0" "$rc" "update must refuse to pull over local modifications"
+    assert_contains "$output" "docker-compose.yml" "the modified file must be named"
+    assert_contains "$output" "docker-compose.override.yml" \
+        "the supported customization path must be pointed at"
+    harness_assert_not_called "git pull" "the pull must not be attempted on a dirty tree"
+}
+
+test_update_pulls_on_a_clean_tree() {
+    local rc=0
+    sandbox_run "update" >/dev/null || rc=$?
+    assert_equals "0" "$rc" "update should succeed on a clean tree"
+    harness_assert_called "git pull" "a clean tree must be pulled"
+}
+
+# --- fail-safe: a failed upgrade/downgrade must leave the old version up ---
+# The stop->start window: broadcast.sh runs under `set -e`, so any failure
+# after `systemctl stop broadcast` and before the final start used to leave
+# the service STOPPED (customer outage, 2026-08-04; smoke Phase 7b). These
+# tests pin the fail-safe trap: report failure, roll the image pin back,
+# start the previous version on the way out.
+
+test_upgrade_continue_failsafe_restarts_service_on_pull_failure() {
+    harness_mock su 'exit 1'   # the explicit `docker compose pull` step fails
+
+    local rc=0
+    sandbox_run "_upgrade_continue 2.5.0" >/dev/null || rc=$?
+    assert_not_equals "0" "$rc" "a failed upgrade must still exit nonzero"
+
+    harness_assert_called "systemctl start broadcast" \
+        "fail-safe must start the service after a mid-window failure"
+    assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":2.0.0" \
+        ".image must be rolled back to the pre-upgrade version"
+    assert_equals "2.0.0" "$(cat "$SANDBOX_ROOT/.current_version")" \
+        ".current_version must be rolled back to the pre-upgrade version"
+}
+
+test_upgrade_continue_starts_service_exactly_once_on_success() {
+    sandbox_run "_upgrade_continue 2.5.0" >/dev/null
+
+    local count
+    count=$(/usr/bin/grep -c "^systemctl start broadcast$" "$SANDBOX_CALLS")
+    assert_equals "1" "$count" \
+        "the fail-safe must be disarmed on success — no second start from the trap"
+}
+
+test_upgrade_updates_before_stopping() {
+    harness_stub_broadcast_sh
+    local rc=0
+    sandbox_run "upgrade" >/dev/null || rc=$?
+    assert_equals "0" "$rc" "upgrade should proceed"
+
+    harness_assert_call_order \
+        "broadcast.sh update" \
+        "systemctl stop broadcast" \
+        "broadcast.sh _upgrade_continue"
+}
+
+test_upgrade_update_failure_never_touches_the_service() {
+    # Stub broadcast.sh so the `update` dispatch fails — a dirty tree or
+    # unreachable GitHub. Since the update now precedes the stop, the
+    # failure must abort the upgrade with the service NEVER stopped.
+    cat > "$SANDBOX_ROOT/broadcast.sh" <<STUB
+#!/bin/bash
+echo "broadcast.sh \$*" >> "$SANDBOX_CALLS"
+[ "\${1:-}" = "update" ] && exit 1
+exit 0
+STUB
+    chmod +x "$SANDBOX_ROOT/broadcast.sh"
+
+    local rc=0
+    sandbox_run "upgrade" >/dev/null || rc=$?
+    assert_not_equals "0" "$rc" "upgrade must fail when the script update fails"
+
+    harness_assert_not_called "systemctl stop broadcast" \
+        "a failed script update must abort BEFORE the service is stopped"
+}
+
+test_downgrade_continue_failsafe_restarts_service_on_pull_failure() {
+    harness_mock su 'exit 1'
+
+    local rc=0
+    sandbox_run "_downgrade_continue 1.5.0" >/dev/null || rc=$?
+    assert_not_equals "0" "$rc" "a failed downgrade must still exit nonzero"
+
+    harness_assert_called "systemctl start broadcast" \
+        "fail-safe must start the service after a mid-window failure"
+    assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":2.0.0" \
+        ".image must be rolled back to the pre-downgrade version"
+    assert_equals "2.0.0" "$(cat "$SANDBOX_ROOT/.current_version")" \
+        ".current_version must be rolled back to the pre-downgrade version"
+}
+
 run_upgrade_downgrade_tests() {
     echo "Running Upgrade/Downgrade Continuation Tests"
     echo "============================================"
@@ -257,7 +365,7 @@ run_upgrade_downgrade_tests() {
 
     run_test "test_downgrade_requires_a_version" test_downgrade_requires_a_version
     run_test "test_downgrade_rejects_invalid_version_format" test_downgrade_rejects_invalid_version_format
-    run_test "test_downgrade_stops_updates_then_reexecs" test_downgrade_stops_updates_then_reexecs
+    run_test "test_downgrade_updates_before_stopping" test_downgrade_updates_before_stopping
     run_test "test_upgrade_continue_full_sequence_with_version" test_upgrade_continue_full_sequence_with_version
     run_test "test_upgrade_continue_defaults_to_latest" test_upgrade_continue_defaults_to_latest
     run_test "test_upgrade_continue_installs_cleanup_service_when_missing" test_upgrade_continue_installs_cleanup_service_when_missing
@@ -270,6 +378,13 @@ run_upgrade_downgrade_tests() {
     run_test "test_upgrade_continue_refreshes_stale_broadcast_unit" test_upgrade_continue_refreshes_stale_broadcast_unit
     run_test "test_upgrade_continue_leaves_current_broadcast_unit_alone" test_upgrade_continue_leaves_current_broadcast_unit_alone
     run_test "test_downgrade_continue_full_sequence" test_downgrade_continue_full_sequence
+    run_test "test_update_refuses_a_dirty_tree_with_guidance" test_update_refuses_a_dirty_tree_with_guidance
+    run_test "test_update_pulls_on_a_clean_tree" test_update_pulls_on_a_clean_tree
+    run_test "test_upgrade_continue_failsafe_restarts_service_on_pull_failure" test_upgrade_continue_failsafe_restarts_service_on_pull_failure
+    run_test "test_upgrade_continue_starts_service_exactly_once_on_success" test_upgrade_continue_starts_service_exactly_once_on_success
+    run_test "test_upgrade_updates_before_stopping" test_upgrade_updates_before_stopping
+    run_test "test_upgrade_update_failure_never_touches_the_service" test_upgrade_update_failure_never_touches_the_service
+    run_test "test_downgrade_continue_failsafe_restarts_service_on_pull_failure" test_downgrade_continue_failsafe_restarts_service_on_pull_failure
 
     local result
     print_test_summary

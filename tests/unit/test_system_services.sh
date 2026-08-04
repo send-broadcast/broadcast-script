@@ -42,8 +42,28 @@ test_create_service_writes_correct_unit_file() {
     assert_contains "$unit" "User=broadcast" "service must run as the broadcast user"
     assert_contains "$unit" "Restart=always" "service must auto-restart"
     assert_contains "$unit" "WantedBy=multi-user.target" "service must be installable for boot"
-    assert_contains "$unit" "docker compose -f" "start/stop must go through docker compose"
+    assert_contains "$unit" "docker compose" "start/stop must go through docker compose"
     assert_contains "$unit" ".image" "the image env file must be loaded before compose"
+}
+
+# --- customer compose customization (docker-compose.override.yml) ----------
+# Incident (2026-08-04, firstborngroup): a customer hand-edited
+# docker-compose.yml, which broke the nightly `git pull` and every upgrade.
+# The supported path is docker-compose.override.yml, which Compose merges
+# automatically — but ONLY when invoked without explicit -f flags. The unit
+# must rely on WorkingDirectory for file discovery so the override applies.
+
+test_create_service_honors_compose_override_file() {
+    sandbox_run "create_broadcast_service" >/dev/null
+
+    local unit
+    unit=$(cat "$UNIT_FILE")
+    if echo "$unit" | /usr/bin/grep -E "docker compose[^\"]*-f" >/dev/null; then
+        echo -e "${RED}Assertion failed: unit passes explicit -f to docker compose — docker-compose.override.yml would be ignored${NC}"
+        TEST_FAILED=true
+    fi
+    assert_contains "$unit" "WorkingDirectory=" \
+        "compose file discovery must come from the working directory"
 }
 
 test_create_service_reloads_and_enables() {
@@ -234,6 +254,7 @@ run_system_service_tests() {
     TEST_TEARDOWN_FUNCTION="teardown_sandbox"
 
     run_test "test_create_service_writes_correct_unit_file" test_create_service_writes_correct_unit_file
+    run_test "test_create_service_honors_compose_override_file" test_create_service_honors_compose_override_file
     run_test "test_create_service_reloads_and_enables" test_create_service_reloads_and_enables
     run_test "test_create_service_disables_an_active_service_first" test_create_service_disables_an_active_service_first
     run_test "test_create_service_skips_disable_when_not_active" test_create_service_skips_disable_when_not_active

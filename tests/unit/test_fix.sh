@@ -441,6 +441,24 @@ test_fix_survives_a_failed_repair() {
     assert_contains "$output" "Done:" "the run must reach its summary despite the failure"
 }
 
+# A hand-edited tracked file blocks every git pull (2026-08-04 incident).
+# fix must never discard customer changes — it reports the files as
+# unfixable and points at the supported override path.
+test_fix_flags_local_modifications_with_override_guidance() {
+    harness_mock git 'case "$*" in
+  *"status --porcelain"*) echo " M docker-compose.yml" ;;
+esac
+exit 0'
+
+    local output rc=0
+    output=$(sandbox_run "fix" "$FIX_ENV") || rc=$?
+
+    assert_not_equals "0" "$rc" "a dirty tree is unfixable by fix and must exit 1"
+    assert_contains "$output" "docker-compose.yml" "the modified file must be named"
+    assert_contains "$output" "docker-compose.override.yml" \
+        "guidance must point at the supported customization path"
+}
+
 test_fix_reports_clean_on_healthy_system() {
     # Healthy: correct ownership, units present AND current, cron populated,
     # keys exist. broadcast.service must match the template — an empty or
@@ -508,6 +526,7 @@ run_fix_tests() {
     run_test "test_fix_fails_on_database_password_mismatch" test_fix_fails_on_database_password_mismatch
     run_test "test_fix_survives_a_failed_repair" test_fix_survives_a_failed_repair
     run_test "test_fix_reports_clean_on_healthy_system" test_fix_reports_clean_on_healthy_system
+    run_test "test_fix_flags_local_modifications_with_override_guidance" test_fix_flags_local_modifications_with_override_guidance
 
     local result
     print_test_summary

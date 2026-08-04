@@ -477,20 +477,69 @@ test_diagnose_records_timeline() {
         "container OOM flags must be included (cgroup kills miss the kernel journal)"
 }
 
-test_diagnose_cron_liveness() {
-    # Fresh cron log → ok
-    touch "$SANDBOX_ROOT/logs/cron/monitor.log"
+test_diagnose_cron_liveness_keys_off_monitor_heartbeat() {
+    # The real failure mode (2026-08-04 customer bundle): successful cron
+    # runs emit no stdout, so cron logs sit 0-byte with stale mtimes forever
+    # — log mtime is a false-positive WARN generator. The true heartbeat is
+    # app/monitor/system.json, rewritten every minute by the monitor cron.
+    touch -t 202601010000 "$SANDBOX_ROOT/logs/cron/monitor.log"   # stale log
+    echo '{}' > "$SANDBOX_ROOT/app/monitor/system.json"           # fresh heartbeat
     sandbox_run "diagnose" >/dev/null
     local dir
     dir=$(bundle_dir)
-    assert_contains "$(cat "${dir}cron.txt")" "ok:" "recent cron activity should be ok"
+    assert_contains "$(cat "${dir}cron.txt")" "ok:" \
+        "a fresh monitor heartbeat means cron is alive, whatever the log mtimes say"
 
-    # Stale cron logs → WARN (new bundle in the same sandbox)
-    touch -t 202601010000 "$SANDBOX_ROOT/logs/cron/monitor.log"
+    # Stale heartbeat → WARN (new bundle in the same sandbox)
+    touch -t 202601010000 "$SANDBOX_ROOT/app/monitor/system.json"
     sandbox_run "diagnose" >/dev/null
     dir=$(ls -dt "$SANDBOX_ROOT/logs/diagnose-"*/ | head -1)
     assert_contains "$(cat "${dir}cron.txt")" "WARN" \
-        "stale cron logs mean dead automation and must warn"
+        "a stale heartbeat means cron is dead and must warn"
+}
+
+test_diagnose_cron_section_tails_update_and_trigger_logs() {
+    # The 2026-08-04 incident (git pull failing nightly for weeks) was
+    # invisible in the bundle — update.log/trigger.log were never captured.
+    echo "error: Your local changes would be overwritten by merge" > "$SANDBOX_ROOT/logs/cron/update.log"
+    echo "upgrade triggered with target version: 2.25.0" > "$SANDBOX_ROOT/logs/cron/trigger.log"
+    sandbox_run "diagnose" >/dev/null
+
+    local dir cron
+    dir=$(bundle_dir)
+    cron=$(cat "${dir}cron.txt")
+    assert_contains "$cron" "overwritten by merge" "the update.log tail must be captured"
+    assert_contains "$cron" "upgrade triggered" "the trigger.log tail must be captured"
+}
+
+test_diagnose_captures_local_customizations() {
+    harness_mock git 'case "$*" in
+  *"status --porcelain"*) echo " M docker-compose.yml" ;;
+  *"log -1"*) echo "9f9b148 pinned test revision" ;;
+esac
+exit 0'
+    cat > "$SANDBOX_ROOT/docker-compose.override.yml" <<'EOT'
+services:
+  postgres:
+    ports: ["127.0.0.1:5432:5432"]
+EOT
+
+    local output
+    output=$(sandbox_run "diagnose")
+
+    local dir cust
+    dir=$(bundle_dir)
+    assert_file_exists "${dir}customizations.txt" \
+        "local customizations must be captured in the bundle"
+    cust=$(cat "${dir}customizations.txt")
+    assert_contains "$cust" "M docker-compose.yml" \
+        "a dirty tree (blocks all updates) must be visible in the bundle"
+    assert_contains "$cust" "docker-compose.override.yml" \
+        "the override file's presence must be reported"
+    assert_contains "$cust" "127.0.0.1:5432" \
+        "the override file's contents must be captured"
+    assert_contains "$output" "M docker-compose.yml" \
+        "the paste report must surface local modifications"
 }
 
 test_diagnose_filters_job_and_postgres_errors() {
@@ -595,7 +644,9 @@ run_diagnose_tests() {
     run_test "test_diagnose_warns_when_no_backups_exist" test_diagnose_warns_when_no_backups_exist
     run_test "test_diagnose_attributes_disk_usage" test_diagnose_attributes_disk_usage
     run_test "test_diagnose_records_timeline" test_diagnose_records_timeline
-    run_test "test_diagnose_cron_liveness" test_diagnose_cron_liveness
+    run_test "test_diagnose_cron_liveness_keys_off_monitor_heartbeat" test_diagnose_cron_liveness_keys_off_monitor_heartbeat
+    run_test "test_diagnose_cron_section_tails_update_and_trigger_logs" test_diagnose_cron_section_tails_update_and_trigger_logs
+    run_test "test_diagnose_captures_local_customizations" test_diagnose_captures_local_customizations
     run_test "test_diagnose_filters_job_and_postgres_errors" test_diagnose_filters_job_and_postgres_errors
     run_test "test_diagnose_checks_outbound_network" test_diagnose_checks_outbound_network
     run_test "test_diagnose_reports_blocked_smtp_egress" test_diagnose_reports_blocked_smtp_egress
