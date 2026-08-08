@@ -123,12 +123,32 @@ test_production_compose_logs_to_journald() {
         "the manual/dev compose file must stay on json-file (no journald on macOS)"
 }
 
+# --- postgres shutdown and session hygiene ----------------------------------
+# Two settings that together address the "upgrade hangs" class of failure:
+# a grace period long enough to finish a shutdown checkpoint on a large
+# database (10s default -> SIGKILL -> WAL crash recovery -> unhealthy
+# healthcheck -> app waits on depends_on), and a server-side timeout that
+# reaps abandoned client transactions, which is what a remote GUI client
+# leaves behind when someone closes the laptop lid mid-query.
+
+test_postgres_has_a_shutdown_grace_period() {
+    assert_contains "$(cat "$COMPOSE_FILE")" "stop_grace_period" \
+        "postgres needs a stop_grace_period: a shutdown checkpoint on a large database exceeds the 10s default, so postgres is SIGKILLed into WAL crash recovery and the next boot stalls on an unhealthy healthcheck"
+}
+
+test_postgres_reaps_idle_transactions() {
+    assert_contains "$(cat "$COMPOSE_FILE")" "idle_in_transaction_session_timeout" \
+        "postgres needs idle_in_transaction_session_timeout: an abandoned remote transaction holds locks indefinitely and blocks the migration that runs on app boot"
+}
+
 run_docker_reference_tests() {
     echo "Running Docker Reference Consistency Tests"
     echo "=========================================="
 
     init_test_framework
 
+    run_test "test_postgres_has_a_shutdown_grace_period" test_postgres_has_a_shutdown_grace_period
+    run_test "test_postgres_reaps_idle_transactions" test_postgres_reaps_idle_transactions
     run_test "test_compose_file_parses" test_compose_file_parses
     run_test "test_service_references_exist_in_compose" test_service_references_exist_in_compose
     run_test "test_container_references_exist_in_compose" test_container_references_exist_in_compose

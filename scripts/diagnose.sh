@@ -415,6 +415,14 @@ function diagnose() {
     echo
     echo "--- trigger.log tail (dashboard-triggered operations) ---"
     tail -20 /opt/broadcast/logs/cron/trigger.log 2>/dev/null || echo "(no trigger.log)"
+    echo
+    # A deferred upgrade is correct behaviour once, but a server that is busy
+    # around the clock would stop upgrading and never say so.
+    if [ -f /opt/broadcast/.upgrade_deferred ]; then
+      echo "WARN: an upgrade has been deferred $(head -1 /opt/broadcast/.upgrade_deferred 2>/dev/null) time(s) because work was in flight — target: $(sed -n '2p' /opt/broadcast/.upgrade_deferred 2>/dev/null || echo latest)"
+    else
+      echo "ok: no upgrade is currently deferred"
+    fi
   } > "$bundle/cron.txt"
 
   diagnose_step "local customizations"

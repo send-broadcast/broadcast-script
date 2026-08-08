@@ -24,6 +24,7 @@ function includeDependencies() {
   source "${current_dir}/scripts/restart.sh"
   source "${current_dir}/scripts/backup.sh"
   source "${current_dir}/scripts/restore.sh"
+  source "${current_dir}/scripts/preflight.sh"
   source "${current_dir}/scripts/upgrade.sh"
   source "${current_dir}/scripts/downgrade.sh"
   source "${current_dir}/scripts/monitor.sh"
@@ -126,13 +127,13 @@ main() {
       install
       ;;
     upgrade)
-      if [ $# -gt 1 ]; then
-        # Pass version parameter if provided
-        upgrade "$2"
-      else
-        # Standard upgrade without version
-        upgrade
-      fi
+      # Forward every argument: the version plus any --force / --automated
+      # flags the preflight understands.
+      shift
+      upgrade "$@"
+      ;;
+    preflight)
+      upgrade_preflight
       ;;
     downgrade)
       if [ $# -lt 2 ]; then

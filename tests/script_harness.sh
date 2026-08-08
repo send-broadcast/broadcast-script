@@ -31,7 +31,7 @@ SANDBOX_CALLS=""
 
 # Scripts loaded into every sandbox, in source order (common first; restore
 # defines compare_versions used by others).
-HARNESS_SCRIPTS="common.sh restore.sh backup.sh update.sh upgrade.sh downgrade.sh trigger.sh monitor.sh diagnose.sh fix.sh health.sh init-services.sh"
+HARNESS_SCRIPTS="common.sh preflight.sh restore.sh backup.sh update.sh upgrade.sh downgrade.sh trigger.sh monitor.sh diagnose.sh fix.sh health.sh init-services.sh"
 
 harness_make_sandbox() {
     SANDBOX_ROOT=$(mktemp -d)

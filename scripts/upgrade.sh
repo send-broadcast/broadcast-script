@@ -47,7 +47,29 @@ _run_service_failsafe() {
 }
 
 function upgrade() {
-  local target_version="${1:-}"
+  local target_version="" force="" automated=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force="yes" ;;
+      --automated) automated="yes" ;;
+      *) target_version="$1" ;;
+    esac
+    shift
+  done
+
+  # Preflight BEFORE anything destructive. Stopping the service is the point
+  # of no return for work a restart cannot resume — a job mid-batch is killed,
+  # not requeued. An automated run defers instead of failing: a nonzero exit
+  # here would turn every busy night into cron failure mail, and the queue
+  # drains on its own.
+  if [ -z "$force" ]; then
+    if ! upgrade_preflight ${automated:+--automated} ${target_version:+$target_version}; then
+      if [ -n "$automated" ]; then
+        return 0
+      fi
+      return 1
+    fi
+  fi
 
   # Update scripts BEFORE stopping the service: a failed git pull (dirty
   # tree from a hand-edited file, unreachable GitHub) then aborts the
@@ -63,6 +85,10 @@ function upgrade() {
   else
     echo -e "\e[33mStopping Broadcast service...\e[0m"
   fi
+  # Close lingering database sessions first so postgres can shut down
+  # promptly instead of being SIGKILLed mid-checkpoint (see preflight.sh).
+  disconnect_database_clients
+
   systemctl stop broadcast
 
   # Re-exec with updated scripts to ensure new code runs

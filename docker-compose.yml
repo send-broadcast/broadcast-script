@@ -64,6 +64,21 @@ services:
       - /opt/broadcast/db/init-scripts:/docker-entrypoint-initdb.d
     ports:
       - "127.0.0.1:5432:5432"
+    # An abandoned client transaction (a GUI client left open on someone's
+    # desk) holds its locks indefinitely. The migration that runs on app boot
+    # then queues behind it forever, and because a pending ACCESS EXCLUSIVE
+    # request also blocks every reader behind it, one idle session can wedge
+    # the whole app. Reap them.
+    command:
+      - postgres
+      - -c
+      - idle_in_transaction_session_timeout=10min
+    # Compose allows 10s before SIGKILL by default, which a shutdown
+    # checkpoint on a multi-GB database can exceed. A SIGKILLed postgres does
+    # WAL crash recovery on the next boot, its healthcheck stays unhealthy,
+    # and `depends_on: service_healthy` leaves the app waiting — the shape of
+    # a "hanging" upgrade.
+    stop_grace_period: 60s
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U broadcast"]
       interval: 10s

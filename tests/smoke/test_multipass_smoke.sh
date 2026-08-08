@@ -1162,6 +1162,107 @@ test_upgrade_dirty_tree_protection() {
     run_health_checks "Phase 7c (customized install)"
 }
 
+# Phase 7d: the upgrade preflight and the shutdown session sweep, end to end.
+# Covers the two halves of the firstborngroup "upgrade hangs" report:
+#   1. we must not stop the stack while a job is mid-execution
+#   2. a remote client holding a session must not be able to stall the
+#      postgres shutdown into a SIGKILL (which causes WAL crash recovery on
+#      the next boot, an unhealthy healthcheck, and an app container that
+#      sits waiting on depends_on)
+# The remote client is simulated with a real psql session held open from
+# inside the VM, connected over the published port exactly as their BI tool
+# would be.
+test_upgrade_preflight_and_session_sweep() {
+    log_info "=== Phase 7d: Upgrade preflight + database session sweep ==="
+
+    log_test "preflight reports a clean system as safe"
+    if vm_exec_root "cd /opt/broadcast && ./broadcast.sh preflight" | grep -q "safe to upgrade"; then
+        log_success "preflight passes on an idle install"
+    else
+        log_fail "preflight did not report an idle system as safe"
+    fi
+
+    # Simulate a job a worker has already claimed. This is the state that must
+    # block: killing it cuts a send off partway through a batch.
+    log_info "Claiming a job to simulate a send in progress..."
+    vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_queue_production -c \
+        \"INSERT INTO solid_queue_processes (kind, name, pid, last_heartbeat_at, created_at) VALUES ('Worker', 'smoke', 999, NOW(), NOW());\" >/dev/null"
+    vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_queue_production -c \
+        \"INSERT INTO solid_queue_jobs (queue_name, class_name, priority, created_at, updated_at) VALUES ('default', 'BroadcastSendJob', 0, NOW(), NOW());\" >/dev/null"
+    vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_queue_production -c \
+        \"INSERT INTO solid_queue_claimed_executions (job_id, process_id, created_at) SELECT j.id, p.id, NOW() FROM solid_queue_jobs j, solid_queue_processes p WHERE j.class_name = 'BroadcastSendJob' AND p.name = 'smoke' LIMIT 1;\" >/dev/null"
+
+    local out rc=0
+    out=$(vm_exec_root "cd /opt/broadcast && ./broadcast.sh upgrade" 2>&1) || rc=$?
+
+    log_test "upgrade refuses while a job is mid-execution"
+    if [ "$rc" -ne 0 ] && echo "$out" | grep -q "mid-execution"; then
+        log_success "preflight blocked the upgrade and named the running job"
+    else
+        log_fail "upgrade proceeded (or gave no reason) with a claimed job present: $out"
+    fi
+
+    log_test "the blocked upgrade never stopped the service"
+    if vm_exec_root "systemctl is-active --quiet broadcast.service" \
+        && vm_exec_root "docker inspect -f {{.State.Status}} app | grep -q running"; then
+        log_success "service and app container stayed up"
+    else
+        log_fail "the service went down on a check that runs before the stop"
+    fi
+
+    log_test "--force overrides the preflight"
+    if vm_exec_root "cd /opt/broadcast && ./broadcast.sh preflight" >/dev/null 2>&1; then
+        log_fail "preflight should still be blocking at this point"
+    else
+        log_success "preflight still blocking, so --force has something to override"
+    fi
+
+    log_info "Clearing the simulated in-flight work..."
+    vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_queue_production -c \
+        \"DELETE FROM solid_queue_claimed_executions; DELETE FROM solid_queue_jobs WHERE class_name = 'BroadcastSendJob'; DELETE FROM solid_queue_processes WHERE name = 'smoke';\" >/dev/null"
+
+    log_test "preflight clears once the work is done"
+    if vm_exec_root "cd /opt/broadcast && ./broadcast.sh preflight" | grep -q "safe to upgrade"; then
+        log_success "preflight passes again"
+    else
+        log_fail "preflight still blocking after the work was cleared"
+    fi
+
+    # --- the session sweep -------------------------------------------------
+    log_info "Opening a long-lived database session (simulating their remote client)..."
+    # `idle in transaction` is the dangerous state: it holds locks. Held open
+    # in the background via a FIFO so the session stays alive across commands.
+    vm_exec_root "nohup docker exec postgres psql -U broadcast -d broadcast_primary_production \
+        -c 'BEGIN; SELECT pg_sleep(600);' >/dev/null 2>&1 &" || true
+    sleep 3
+
+    log_test "the sweep sees and closes the lingering session"
+    out=$(vm_exec_root "cd /opt/broadcast && ./broadcast.sh restart" 2>&1) || true
+    if echo "$out" | grep -q "Closing database sessions before shutdown"; then
+        log_success "sweep ran and named the sessions it closed"
+    else
+        log_fail "restart did not report closing database sessions: $out"
+    fi
+
+    log_test "postgres shut down cleanly (no WAL crash recovery on the next boot)"
+    if vm_exec_root "journalctl CONTAINER_NAME=postgres --since '2 minutes ago' --no-pager" \
+        | grep -q "database system was not properly shut down"; then
+        log_fail "postgres was SIGKILLed and recovered from WAL — the shutdown is still stalling"
+    else
+        log_success "clean shutdown, no crash recovery"
+    fi
+
+    log_test "idle_in_transaction_session_timeout is active on the server"
+    if vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_primary_production -t -A \
+        -c 'SHOW idle_in_transaction_session_timeout'" | grep -qv "^0$"; then
+        log_success "abandoned transactions are reaped by the server"
+    else
+        log_fail "idle_in_transaction_session_timeout is still disabled"
+    fi
+
+    run_health_checks "Phase 7d (post-preflight)"
+}
+
 # Shared streaming lifecycle assertions: start via trigger, survive container
 # recreation (reattach), and stop on trigger removal. Used by both the
 # behavioural (--test-upgrade) and genuine-upgrade (--test-real-upgrade) phases.
@@ -1414,6 +1515,7 @@ run_for_version() {
     if [ "$FLAG_TEST_UPGRADE_FAILSAFE" = true ]; then
         test_upgrade_failure_failsafe
         test_upgrade_dirty_tree_protection
+        test_upgrade_preflight_and_session_sweep
     fi
 
     # Always last: changes the installation domain and restarts the stack

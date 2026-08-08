@@ -6,6 +6,17 @@ function trigger() {
     echo "[$(date)] Added BROADCAST_MANAGED=true to app/.env"
   fi
 
+  # Retry an upgrade the preflight deferred. The trigger file is consumed
+  # below before the upgrade runs, and it must be: the app treats its presence
+  # as "system unavailable", so leaving it in place through a deferral that
+  # may last hours would show a maintenance state the whole time. The deferral
+  # record carries the request instead (line 1 count, line 2 target version).
+  if [ ! -f "/opt/broadcast/app/triggers/upgrade.txt" ] && [ -f "/opt/broadcast/.upgrade_deferred" ]; then
+    deferred_version=$(sed -n '2p' "/opt/broadcast/.upgrade_deferred" 2>/dev/null || echo "")
+    echo "[$(date)] retrying previously deferred upgrade${deferred_version:+ to $deferred_version}"
+    /opt/broadcast/broadcast.sh upgrade --automated ${deferred_version:+$deferred_version}
+  fi
+
   # Check if the upgrade.txt file exists in the triggers directory
   if [ -f "/opt/broadcast/app/triggers/upgrade.txt" ]; then
     # Read the content of the upgrade.txt file
@@ -20,7 +31,7 @@ function trigger() {
       rm "/opt/broadcast/app/triggers/upgrade.txt"
       
       # Run upgrade with version parameter
-      /opt/broadcast/broadcast.sh upgrade "$target_version"
+      /opt/broadcast/broadcast.sh upgrade --automated "$target_version"
       
       echo "[$(date)] upgrade to version $target_version completed"
     else
@@ -31,7 +42,7 @@ function trigger() {
       rm "/opt/broadcast/app/triggers/upgrade.txt"
       
       # Run standard upgrade without version
-      /opt/broadcast/broadcast.sh upgrade
+      /opt/broadcast/broadcast.sh upgrade --automated
       
       echo "[$(date)] upgrade completed (fallback mode)"
     fi
