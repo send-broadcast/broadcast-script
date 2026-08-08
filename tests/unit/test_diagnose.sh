@@ -40,7 +40,20 @@ setup_sandbox() {
     if [ "${DIAGNOSE_PUMA_CODE:-200}" = "000" ]; then exit 7; fi
     ;;
   exec\ app\ bin/rails*) echo "${RAILS_MOCK_STATUS:-up     20260101000000  Create things}" ;;
+  exec\ postgres\ psql*client_addr*) printf "%s\n" "${PSQL_SOURCES_MOCK:-172.18.0.3 broadcast_primary_production idle 12}" ;;
+  exec\ postgres\ psql*max_connections*) echo "${PSQL_MAX_CONN_MOCK:-100}" ;;
   exec\ postgres\ psql*) echo "${PSQL_MOCK_OUTPUT:-42}" ;;
+  inspect\ -f\ *Gateway*) echo "${DOCKER_GATEWAY_MOCK:-172.18.0.1}" ;;
+  inspect\ -f\ *IPAddress*)
+    # docker inspect prints the containers it found and exits non-zero when
+    # any named container is missing (DOCKER_IPS_PARTIAL simulates a downed
+    # app container).
+    if [ -n "${DOCKER_IPS_PARTIAL:-}" ]; then
+      printf "172.18.0.3\n"
+      exit 1
+    fi
+    printf "172.18.0.2\n172.18.0.3\n172.18.0.4\n"
+    ;;
   inspect*) echo "/app: restarts=0 started=2026-07-31T11:48:19Z OOMKilled=false" ;;
   ps*) echo "NAMES STATUS: app Up 2 days" ;;
   stats*) echo "NAME CPU MEM: app 1% 512MB" ;;
@@ -422,6 +435,79 @@ test_diagnose_records_database_health() {
         "an up-to-date schema should be reported as ok"
 }
 
+# --- database connection sources -------------------------------------------
+# A remote client (psql, a BI tool, an SSH tunnel) holding connections looks
+# exactly like an app hang: requests time out while Postgres itself is fine.
+# The bare active/max counts cannot tell the two apart, so diagnose must also
+# record WHO is connected (firstborngroup 2026-08-04 case).
+
+test_diagnose_records_database_connection_sources() {
+    sandbox_run "diagnose" >/dev/null
+
+    local dir db
+    dir=$(bundle_dir)
+    db=$(cat "${dir}database.txt")
+    assert_contains "$db" "Connections by source" \
+        "the connection breakdown must be recorded"
+    assert_contains "$db" "172.18.0.3" \
+        "each connecting client address must be listed"
+}
+
+test_diagnose_warns_on_external_database_client() {
+    # An address that belongs to no Broadcast container is a foreign client
+    # eating the connection ceiling — the whole point of the breakdown.
+    sandbox_run "diagnose" \
+        'export PSQL_SOURCES_MOCK="203.0.113.9 broadcast_primary_production idle 40"' >/dev/null
+
+    assert_contains "$(cat "$(bundle_dir)database.txt")" "WARN" \
+        "a client outside the Broadcast containers must warn"
+}
+
+test_diagnose_warns_on_connections_through_published_port() {
+    # docker-proxy rewrites the source to the bridge gateway, so gateway
+    # sessions arrived through the published 5432 port rather than from a
+    # sibling container.
+    sandbox_run "diagnose" \
+        'export PSQL_SOURCES_MOCK="172.18.0.1 broadcast_primary_production idle 5"' >/dev/null
+
+    assert_contains "$(cat "$(bundle_dir)database.txt")" "published" \
+        "gateway sessions must be reported as arriving through the published port"
+}
+
+test_diagnose_accepts_connections_from_broadcast_containers() {
+    # The default mock is the app container: normal, must not cry wolf.
+    local db
+    sandbox_run "diagnose" >/dev/null
+    db=$(cat "$(bundle_dir)database.txt")
+
+    if [[ "$db" == *"WARN"* ]]; then
+        assert_equals "no warning" "WARN present" \
+            "container-sourced connections well under the ceiling must not warn"
+    fi
+}
+
+test_diagnose_does_not_cry_wolf_when_a_container_is_down() {
+    # The crash case: the app container is gone, so `docker inspect app job
+    # postgres` exits non-zero while still printing the survivors. The
+    # surviving containers' own sessions must not be called external — a false
+    # alarm exactly when support is reading the bundle most carefully.
+    local db
+    sandbox_run "diagnose" 'export DOCKER_IPS_PARTIAL=1' >/dev/null
+    db=$(cat "$(bundle_dir)database.txt")
+
+    if [[ "$db" == *"not from a Broadcast container"* ]]; then
+        assert_equals "no false alarm" "external-client WARN present" \
+            "a surviving container's own sessions must not be called external"
+    fi
+}
+
+test_diagnose_warns_when_connections_near_ceiling() {
+    sandbox_run "diagnose" 'export PSQL_MOCK_OUTPUT=95' >/dev/null
+
+    assert_contains "$(cat "$(bundle_dir)database.txt")" "WARN" \
+        "connection use at or above 80% of the ceiling must warn"
+}
+
 test_diagnose_warns_on_pending_migrations() {
     sandbox_run "diagnose" 'export RAILS_MOCK_STATUS="  down    20260801000000  Add new things"' >/dev/null
 
@@ -639,6 +725,12 @@ run_diagnose_tests() {
     run_test "test_diagnose_report_includes_new_sections" test_diagnose_report_includes_new_sections
     run_test "test_diagnose_records_queue_health_and_warns_on_failed_jobs" test_diagnose_records_queue_health_and_warns_on_failed_jobs
     run_test "test_diagnose_records_database_health" test_diagnose_records_database_health
+    run_test "test_diagnose_records_database_connection_sources" test_diagnose_records_database_connection_sources
+    run_test "test_diagnose_warns_on_external_database_client" test_diagnose_warns_on_external_database_client
+    run_test "test_diagnose_warns_on_connections_through_published_port" test_diagnose_warns_on_connections_through_published_port
+    run_test "test_diagnose_accepts_connections_from_broadcast_containers" test_diagnose_accepts_connections_from_broadcast_containers
+    run_test "test_diagnose_does_not_cry_wolf_when_a_container_is_down" test_diagnose_does_not_cry_wolf_when_a_container_is_down
+    run_test "test_diagnose_warns_when_connections_near_ceiling" test_diagnose_warns_when_connections_near_ceiling
     run_test "test_diagnose_warns_on_pending_migrations" test_diagnose_warns_on_pending_migrations
     run_test "test_diagnose_reports_fresh_backup_as_ok" test_diagnose_reports_fresh_backup_as_ok
     run_test "test_diagnose_warns_when_no_backups_exist" test_diagnose_warns_when_no_backups_exist

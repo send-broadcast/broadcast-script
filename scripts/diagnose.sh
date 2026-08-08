@@ -205,9 +205,54 @@ function diagnose() {
   # 12. Database health: pool exhaustion mimics an app hang, and pending
   # migrations after an upgrade/restore cause confusing partial failures
   local psql_primary="docker exec postgres psql -U broadcast -d broadcast_primary_production -t -A -c"
+
+  # Who is connected, not just how many. A remote client (psql, a BI tool, an
+  # SSH tunnel) holding connections starves the app and presents exactly like
+  # an app hang, and the bare active/max counts cannot tell the two apart.
+  # Postgres is published on loopback only, so every legitimate session comes
+  # from a sibling container; docker-proxy rewrites anything arriving through
+  # the published 5432 port to the bridge gateway, and any other address is a
+  # genuinely foreign client.
+  local db_gateway="" db_container_ips="" active_conns="unknown" max_conns="unknown" conn_sources=""
+  # docker inspect exits non-zero when ANY named container is missing but still
+  # prints the ones it found, and the crash case (app container down) is
+  # exactly when this runs. Keep the partial list: discarding it would flag
+  # every surviving container's own sessions as an external client. The `tr`
+  # pipe already masks the exit status (no `pipefail` here), so `|| true` only
+  # documents the intent and keeps this correct if that ever changes.
+  db_gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' postgres 2>/dev/null | tr -d '[:space:]') || true
+  db_container_ips=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' app job postgres 2>/dev/null | tr '\n' ' ') || true
+  active_conns=$($psql_primary "SELECT COUNT(*) FROM pg_stat_activity" 2>/dev/null) || active_conns="unknown"
+  max_conns=$($psql_primary "SHOW max_connections" 2>/dev/null) || max_conns="unknown"
+  conn_sources=$($psql_primary "SELECT COALESCE(host(client_addr), 'local') || ' ' || COALESCE(datname, '-') || ' ' || COALESCE(state, '-') || ' ' || COUNT(*) FROM pg_stat_activity GROUP BY client_addr, datname, state ORDER BY COUNT(*) DESC" 2>/dev/null) || conn_sources=""
+
   {
-    echo "active connections: $($psql_primary "SELECT COUNT(*) FROM pg_stat_activity" 2>/dev/null || echo unknown)"
-    echo "max_connections: $($psql_primary "SHOW max_connections" 2>/dev/null || echo unknown)"
+    echo "active connections: $active_conns"
+    echo "max_connections: $max_conns"
+    if [ "$active_conns" -ge 0 ] 2>/dev/null && [ "$max_conns" -gt 0 ] 2>/dev/null; then
+      if [ "$((active_conns * 100 / max_conns))" -ge 80 ]; then
+        echo "WARN: $active_conns of $max_conns connections in use — at the ceiling Postgres refuses new sessions and every request fails"
+      fi
+    fi
+    echo
+    echo "--- Connections by source (address database state count) ---"
+    if [ -n "$conn_sources" ]; then
+      echo "$conn_sources"
+      local conn_addr
+      for conn_addr in $(echo "$conn_sources" | awk '{print $1}' | sort -u); do
+        case "$conn_addr" in local|"") continue ;; esac
+        if [ -n "$db_gateway" ] && [ "$conn_addr" = "$db_gateway" ]; then
+          echo "WARN: sessions from $conn_addr (the docker bridge gateway) arrived through the published 5432 port rather than from the app or job containers"
+        else
+          case " $db_container_ips " in
+            *" $conn_addr "*) : ;;
+            *) echo "WARN: sessions from $conn_addr are not from a Broadcast container — an external client is consuming the connection ceiling" ;;
+          esac
+        fi
+      done
+    else
+      echo "unknown"
+    fi
     echo
     echo "--- Database sizes ---"
     $psql_primary "SELECT datname || ': ' || pg_size_pretty(pg_database_size(datname)) FROM pg_database WHERE datname LIKE 'broadcast%'" 2>/dev/null || true
