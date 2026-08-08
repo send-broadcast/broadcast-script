@@ -50,7 +50,11 @@ test_trigger_upgrade_with_valid_version() {
 
     sandbox_run "trigger" >/dev/null
 
-    harness_assert_called "broadcast.sh upgrade 1.2.3" "should upgrade to the requested version"
+    # --automated: a dashboard-triggered upgrade defers rather than interrupting
+    # a send, and reports success rather than failure when it does, so cron does
+    # not treat a busy server as a broken one.
+    harness_assert_called "broadcast.sh upgrade --automated 1.2.3" \
+        "should upgrade to the requested version via the automated path"
     assert_file_not_exists "$SANDBOX_ROOT/app/triggers/upgrade.txt" \
         "trigger file must be consumed"
 }
@@ -61,7 +65,7 @@ test_trigger_upgrade_falls_back_on_invalid_version() {
     local output
     output=$(sandbox_run "trigger")
 
-    harness_assert_called "broadcast.sh upgrade" "fallback should still upgrade"
+    harness_assert_called "broadcast.sh upgrade --automated" "fallback should still upgrade"
     harness_assert_not_called "broadcast.sh upgrade not-a-version" \
         "invalid content must not be passed as a version"
     assert_contains "$output" "fallback mode" "fallback should be logged"

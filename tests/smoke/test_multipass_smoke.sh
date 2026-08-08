@@ -101,6 +101,19 @@ vm_exec_root() {
     fi
 }
 
+# Runs SQL against a database in the postgres container.
+#
+# The SQL is base64-encoded on the host because vm_exec_root wraps its command
+# in single quotes (`sudo bash -c '<cmd>'`), so a single quote anywhere in the
+# SQL ends that quoting and corrupts the statement. Every string literal needs
+# one, so passing SQL inline silently produced `VALUES (Worker, ...)` — a bare
+# identifier — and postgres rejected it. base64 is quote-free by construction.
+vm_psql() {
+    local database="$1" sql="$2" b64
+    b64=$(printf '%s' "$sql" | base64 | tr -d '\n')
+    vm_exec_root "echo $b64 | base64 -d > /tmp/smoke_psql.sql && docker exec -i postgres psql -U broadcast -d $database -t -A -v ON_ERROR_STOP=1 < /tmp/smoke_psql.sql"
+}
+
 #######################
 # Credential Loading
 #######################
@@ -404,6 +417,15 @@ run_installer() {
     local end_time=$(date +%s)
     local elapsed=$((end_time - start_time))
     log_info "Installation completed in ${elapsed}s."
+
+    # Restore the reboot patch now that install has run. It mutates a TRACKED
+    # file, and update's dirty-tree protection then refuses to pull for the
+    # rest of the run — which made Phase 7c unpassable in the default
+    # remote-clone mode (--local sidesteps it by rebuilding the repo after
+    # patching). The patch has served its purpose by this point.
+    if [ "$FLAG_LOCAL" != true ]; then
+        vm_exec_root "cd /opt/broadcast && git checkout -- scripts/install.sh" || true
+    fi
 }
 
 #######################
@@ -1185,12 +1207,21 @@ test_upgrade_preflight_and_session_sweep() {
     # Simulate a job a worker has already claimed. This is the state that must
     # block: killing it cuts a send off partway through a batch.
     log_info "Claiming a job to simulate a send in progress..."
-    vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_queue_production -c \
-        \"INSERT INTO solid_queue_processes (kind, name, pid, last_heartbeat_at, created_at) VALUES ('Worker', 'smoke', 999, NOW(), NOW());\" >/dev/null"
-    vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_queue_production -c \
-        \"INSERT INTO solid_queue_jobs (queue_name, class_name, priority, created_at, updated_at) VALUES ('default', 'BroadcastSendJob', 0, NOW(), NOW());\" >/dev/null"
-    vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_queue_production -c \
-        \"INSERT INTO solid_queue_claimed_executions (job_id, process_id, created_at) SELECT j.id, p.id, NOW() FROM solid_queue_jobs j, solid_queue_processes p WHERE j.class_name = 'BroadcastSendJob' AND p.name = 'smoke' LIMIT 1;\" >/dev/null"
+    # Insert a worker process, a job, and the claim row that marks it
+    # mid-execution. Failures here must not abort the whole run, so the
+    # assertion below judges the outcome instead of set -e doing it.
+    vm_psql broadcast_queue_production "INSERT INTO solid_queue_processes (kind, name, pid, last_heartbeat_at, created_at) VALUES ('Worker', 'smoke', 999, NOW(), NOW());" || true
+    vm_psql broadcast_queue_production "INSERT INTO solid_queue_jobs (queue_name, class_name, priority, created_at, updated_at) VALUES ('default', 'BroadcastSendJob', 0, NOW(), NOW());" || true
+    vm_psql broadcast_queue_production "INSERT INTO solid_queue_claimed_executions (job_id, process_id, created_at) SELECT j.id, p.id, NOW() FROM solid_queue_jobs j, solid_queue_processes p WHERE j.class_name = 'BroadcastSendJob' AND p.name = 'smoke' LIMIT 1;" || true
+
+    log_test "the claimed job actually exists (guards the rest of this phase)"
+    local claimed
+    claimed=$(vm_psql broadcast_queue_production "SELECT COUNT(*) FROM solid_queue_claimed_executions;" | tr -dc '0-9')
+    if [ "${claimed:-0}" -ge 1 ]; then
+        log_success "claimed execution present in the queue database"
+    else
+        log_fail "could not create a claimed execution — the assertions below would pass vacuously"
+    fi
 
     local out rc=0
     out=$(vm_exec_root "cd /opt/broadcast && ./broadcast.sh upgrade" 2>&1) || rc=$?
@@ -1210,16 +1241,15 @@ test_upgrade_preflight_and_session_sweep() {
         log_fail "the service went down on a check that runs before the stop"
     fi
 
-    log_test "--force overrides the preflight"
+    log_test "preflight alone also reports the blockage"
     if vm_exec_root "cd /opt/broadcast && ./broadcast.sh preflight" >/dev/null 2>&1; then
-        log_fail "preflight should still be blocking at this point"
+        log_fail "standalone preflight reported safe while a job was claimed"
     else
-        log_success "preflight still blocking, so --force has something to override"
+        log_success "standalone preflight agrees the system is not safe to upgrade"
     fi
 
     log_info "Clearing the simulated in-flight work..."
-    vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_queue_production -c \
-        \"DELETE FROM solid_queue_claimed_executions; DELETE FROM solid_queue_jobs WHERE class_name = 'BroadcastSendJob'; DELETE FROM solid_queue_processes WHERE name = 'smoke';\" >/dev/null"
+    vm_psql broadcast_queue_production "DELETE FROM solid_queue_claimed_executions; DELETE FROM solid_queue_jobs WHERE class_name = 'BroadcastSendJob'; DELETE FROM solid_queue_processes WHERE name = 'smoke';" || true
 
     log_test "preflight clears once the work is done"
     if vm_exec_root "cd /opt/broadcast && ./broadcast.sh preflight" | grep -q "safe to upgrade"; then
@@ -1232,9 +1262,19 @@ test_upgrade_preflight_and_session_sweep() {
     log_info "Opening a long-lived database session (simulating their remote client)..."
     # `idle in transaction` is the dangerous state: it holds locks. Held open
     # in the background via a FIFO so the session stays alive across commands.
-    vm_exec_root "nohup docker exec postgres psql -U broadcast -d broadcast_primary_production \
-        -c 'BEGIN; SELECT pg_sleep(600);' >/dev/null 2>&1 &" || true
+    # `docker exec -d` detaches inside the container, so the session survives
+    # the ssh command returning (a backgrounded ssh child would not).
+    vm_exec_root "docker exec -d postgres psql -U broadcast -d broadcast_primary_production -c \"BEGIN; SELECT pg_sleep(600);\"" || true
     sleep 3
+
+    log_test "the held session is actually open (guards the sweep assertion)"
+    local held
+    held=$(vm_psql broadcast_primary_production "SELECT COUNT(*) FROM pg_stat_activity WHERE backend_type = 'client backend' AND pid <> pg_backend_pid();" | tr -dc '0-9')
+    if [ "${held:-0}" -ge 1 ]; then
+        log_success "client session present before the sweep"
+    else
+        log_fail "no client session to sweep — the assertion below would pass vacuously"
+    fi
 
     log_test "the sweep sees and closes the lingering session"
     out=$(vm_exec_root "cd /opt/broadcast && ./broadcast.sh restart" 2>&1) || true
@@ -1253,11 +1293,15 @@ test_upgrade_preflight_and_session_sweep() {
     fi
 
     log_test "idle_in_transaction_session_timeout is active on the server"
-    if vm_exec_root "docker exec postgres psql -U broadcast -d broadcast_primary_production -t -A \
-        -c 'SHOW idle_in_transaction_session_timeout'" | grep -qv "^0$"; then
-        log_success "abandoned transactions are reaped by the server"
+    # Via vm_psql: an inline `-c 'SHOW ...'` loses its quotes to vm_exec_root
+    # and psql never runs, which reads as "disabled" rather than as a broken
+    # assertion.
+    local iit
+    iit=$(vm_psql broadcast_primary_production "SHOW idle_in_transaction_session_timeout;" | tr -d '[:space:]')
+    if [ -n "$iit" ] && [ "$iit" != "0" ]; then
+        log_success "abandoned transactions are reaped by the server (timeout: $iit)"
     else
-        log_fail "idle_in_transaction_session_timeout is still disabled"
+        log_fail "idle_in_transaction_session_timeout is still disabled (got: ${iit:-<no output>})"
     fi
 
     run_health_checks "Phase 7d (post-preflight)"
@@ -1455,7 +1499,7 @@ parse_args() {
                 echo "  --test-reboot     Also verify services survive a reboot (incl. a reboot with the registry unreachable)"
                 echo "  --test-upgrade    Also verify the log-streaming watcher restart + streaming survives container recreation"
                 echo "  --test-real-upgrade  Run a genuine 'broadcast.sh upgrade' (use with --from-ref to install an older rev first)"
-                echo "  --test-upgrade-failsafe  Upgrade-hardening phases: failed-upgrade fail-safe (7b) and dirty-tree protection + compose override support (7c)"
+                echo "  --test-upgrade-failsafe  Upgrade-hardening phases: failed-upgrade fail-safe (7b), dirty-tree protection + compose override support (7c), and upgrade preflight + database session sweep (7d)"
                 echo "  --from-ref REF    Reset /opt/broadcast to REF before install (remote mode), so an upgrade is genuine old->new"
                 echo "  --verbose         Show all command output"
                 echo "  --help            Show this help message"
