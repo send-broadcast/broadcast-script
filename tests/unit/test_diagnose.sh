@@ -75,9 +75,17 @@ exit 0'
     harness_mock whoami 'echo root'
     harness_mock id 'if [ "${1:-}" = "-nG" ]; then echo "broadcast docker"; else echo "uid=0(root) gid=0(root) groups=0(root)"; fi'
     harness_mock nproc 'echo 4'
-    harness_mock ps 'printf "USER PID %%CPU %%MEM COMMAND\nroot 100 90.0 45.0 some-heavy-process\nbroadcast 200 1.0 5.0 puma\n"'
+    # Realistic length (header + 15 rows, matching the script's `head -16`) so
+    # truncation bugs in the copy-paste report surface. A distinct marker per
+    # sort order tells the memory and CPU blocks apart.
+    harness_mock ps 'if [[ "$*" == *"-%cpu"* ]]; then marker="cpu-hungry-process"; else marker="some-heavy-process"; fi
+printf "USER PID %%CPU %%MEM COMMAND\n"
+printf "root 100 90.0 45.0 %s\n" "$marker"
+i=2
+while [ "$i" -le 15 ]; do printf "broadcast %s 1.0 5.0 filler-process-%s\n" "$((200 + i))" "$i"; i=$((i + 1)); done'
     harness_mock ss 'printf "LISTEN 0 4096 0.0.0.0:80 users((docker-proxy,pid=900))\nLISTEN 0 4096 0.0.0.0:443 users((docker-proxy,pid=901))\n"'
-    harness_mock timedatectl 'echo "System clock synchronized: yes"'
+    harness_mock timedatectl 'printf "%s\n" "${TIMEDATECTL_MOCK:-System clock synchronized: yes
+              NTP service: active}"'
     harness_mock ufw 'echo "Status: active"'
     harness_mock openssl 'if [ "${1:-}" = "x509" ]; then
   printf "subject=CN=test.example.com\nissuer=CN=LetsEncrypt\nnotBefore=Jul  1 00:00:00 2026 GMT\nnotAfter=Sep 29 00:00:00 2026 GMT\n"
@@ -349,6 +357,128 @@ test_diagnose_records_top_processes() {
         "heavy non-Broadcast processes must be visible"
 }
 
+# --- progress feedback -----------------------------------------------------
+# diagnose runs for minutes on a busy server and used to print one line and
+# then nothing until the report. A customer mid-outage reads that as a hang
+# and Ctrl-Cs it, destroying the bundle. Each collector must announce itself
+# BEFORE it runs, so the step that is taking the time names itself.
+
+test_diagnose_announces_each_step_before_running_it() {
+    local output
+    output=$(sandbox_run "diagnose")
+
+    assert_contains "$output" "1/20]" "steps must be numbered so progress is visible"
+    assert_contains "$output" "container logs" "the first step must name itself"
+    assert_contains "$output" "health probes" "later steps must name themselves too"
+}
+
+test_diagnose_step_count_matches_the_declared_total() {
+    # DIAGNOSE_STEP_TOTAL is hand-maintained, so a step added without bumping
+    # it would print "[21/20]" to customers. Assert the last step is the total.
+    local output last
+    output=$(sandbox_run "diagnose")
+    last=$(echo "$output" | grep -o '\[ *[0-9]*/20\]' | tail -1 | tr -d '[] ' | cut -d/ -f1)
+
+    assert_equals "20" "$last" \
+        "the final step number must equal DIAGNOSE_STEP_TOTAL"
+}
+
+test_diagnose_progress_flags_the_slow_step() {
+    # The log capture dominates the runtime; saying so up front is the
+    # difference between "it is working" and "it has hung".
+    assert_contains "$(sandbox_run "diagnose")" "slowest" \
+        "the log capture step must warn that it is the slow one"
+}
+
+test_diagnose_reports_elapsed_time_per_step_and_total() {
+    local output
+    output=$(sandbox_run "diagnose")
+
+    assert_contains "$output" "s)" "each completed step must report its elapsed seconds"
+    assert_contains "$output" "collected in" "the run must report a total duration"
+}
+
+# --- copy-paste report completeness ----------------------------------------
+
+test_diagnose_report_includes_top_processes_by_cpu() {
+    # processes.txt holds the memory block (17 lines) then the CPU block, so
+    # a head -20 on the report stopped one line into the CPU header and the
+    # section printed empty in every real bundle.
+    local output
+    output=$(sandbox_run "diagnose")
+
+    assert_contains "$output" "Top processes by CPU" "the CPU block header must print"
+    assert_contains "$output" "cpu-hungry-process" \
+        "the CPU block must print its rows, not just the header"
+    assert_contains "$output" "some-heavy-process" "the memory block must still print"
+}
+
+# --- bounded log capture ---------------------------------------------------
+# Under the json-file driver a "full dump" was capped at 10m x 3 per
+# container. journald has no such cap, so the same code now scans multi-GB
+# journals: 2m12s runs and 734MB of logs/ on a real server.
+
+test_diagnose_bounds_the_journal_capture_to_a_window() {
+    sandbox_run "diagnose" >/dev/null
+
+    harness_assert_called "journalctl CONTAINER_NAME=app --since" \
+        "journal capture must be bounded by a time window"
+}
+
+test_diagnose_still_never_tails_container_logs() {
+    # Bounding by time must not regress into --tail: a days-old crash has to
+    # stay inside the captured window.
+    sandbox_run "diagnose" >/dev/null
+
+    harness_assert_not_called "docker logs --tail" \
+        "log capture must be bounded by time, never by line tail"
+}
+
+test_diagnose_prunes_old_bundles() {
+    local i
+    for i in 1 2 3 4 5; do
+        mkdir -p "$SANDBOX_ROOT/logs/diagnose-2026-01-0$i-00-00-00"
+        echo stale > "$SANDBOX_ROOT/logs/diagnose-2026-01-0$i-00-00-00/app.log"
+        echo stale > "$SANDBOX_ROOT/logs/diagnose-2026-01-0$i-00-00-00.tar.gz"
+    done
+
+    sandbox_run "diagnose" >/dev/null
+
+    local remaining
+    remaining=$(ls -d "$SANDBOX_ROOT/logs/diagnose-"*/ 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$remaining" -gt 3 ]; then
+        assert_equals "at most 3 bundles" "$remaining bundles" \
+            "old diagnose bundles must be pruned so logs/ cannot grow without limit"
+    fi
+
+    # The bundle from THIS run must always survive the prune.
+    assert_file_exists "$(bundle_dir)app.log" "the current bundle must not be pruned"
+}
+
+# --- clock sync ------------------------------------------------------------
+
+test_diagnose_warns_when_the_clock_is_not_synchronized() {
+    # Observed on a real server: NTP inactive, printed without comment. Clock
+    # skew breaks provider request signatures, which fails as auth errors.
+    sandbox_run "diagnose" \
+        'export TIMEDATECTL_MOCK="System clock synchronized: no
+              NTP service: n/a"' >/dev/null
+
+    assert_contains "$(cat "$(bundle_dir)system.txt")" "WARN" \
+        "an unsynchronized clock must warn"
+}
+
+test_diagnose_does_not_warn_when_the_clock_is_synchronized() {
+    local system
+    sandbox_run "diagnose" >/dev/null
+    system=$(cat "$(bundle_dir)system.txt")
+
+    if [[ "$system" == *"WARN"* ]]; then
+        assert_equals "no warning" "WARN present" \
+            "a synchronized clock with active NTP must not warn"
+    fi
+}
+
 test_diagnose_records_ports_without_warning_for_docker() {
     sandbox_run "diagnose" >/dev/null
 
@@ -484,6 +614,16 @@ test_diagnose_accepts_connections_from_broadcast_containers() {
         assert_equals "no warning" "WARN present" \
             "container-sourced connections well under the ceiling must not warn"
     fi
+}
+
+test_diagnose_counts_only_client_backends() {
+    # pg_stat_activity includes background workers (checkpointer, autovacuum,
+    # walwriter) which hold no max_connections slot. Counting them overstates
+    # usage and skews the ceiling warning.
+    sandbox_run "diagnose" >/dev/null
+
+    harness_assert_called "backend_type" \
+        "the connection count must exclude postgres background workers"
 }
 
 test_diagnose_does_not_cry_wolf_when_a_container_is_down() {
@@ -718,6 +858,17 @@ run_diagnose_tests() {
     run_test "test_diagnose_doctor_passes_on_a_correct_install" test_diagnose_doctor_passes_on_a_correct_install
     run_test "test_diagnose_records_system_specs_and_os" test_diagnose_records_system_specs_and_os
     run_test "test_diagnose_records_top_processes" test_diagnose_records_top_processes
+    run_test "test_diagnose_announces_each_step_before_running_it" test_diagnose_announces_each_step_before_running_it
+    run_test "test_diagnose_step_count_matches_the_declared_total" test_diagnose_step_count_matches_the_declared_total
+    run_test "test_diagnose_progress_flags_the_slow_step" test_diagnose_progress_flags_the_slow_step
+    run_test "test_diagnose_reports_elapsed_time_per_step_and_total" test_diagnose_reports_elapsed_time_per_step_and_total
+    run_test "test_diagnose_report_includes_top_processes_by_cpu" test_diagnose_report_includes_top_processes_by_cpu
+    run_test "test_diagnose_bounds_the_journal_capture_to_a_window" test_diagnose_bounds_the_journal_capture_to_a_window
+    run_test "test_diagnose_still_never_tails_container_logs" test_diagnose_still_never_tails_container_logs
+    run_test "test_diagnose_prunes_old_bundles" test_diagnose_prunes_old_bundles
+    run_test "test_diagnose_warns_when_the_clock_is_not_synchronized" test_diagnose_warns_when_the_clock_is_not_synchronized
+    run_test "test_diagnose_does_not_warn_when_the_clock_is_synchronized" test_diagnose_does_not_warn_when_the_clock_is_synchronized
+    run_test "test_diagnose_counts_only_client_backends" test_diagnose_counts_only_client_backends
     run_test "test_diagnose_records_ports_without_warning_for_docker" test_diagnose_records_ports_without_warning_for_docker
     run_test "test_diagnose_warns_when_foreign_webserver_holds_ports" test_diagnose_warns_when_foreign_webserver_holds_ports
     run_test "test_diagnose_records_ssl_certificate_status" test_diagnose_records_ssl_certificate_status

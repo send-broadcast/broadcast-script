@@ -14,6 +14,36 @@
 #     set SNI, and autocert rejects SNI "localhost" in a way that
 #     masquerades as a certificate failure.
 #   - Every collector is fallible; none may abort the bundle. Exit 0 always.
+#   - Bound the journal capture by TIME, never by line count. Under the old
+#     json-file driver a "full dump" was capped at 10m x 3 per container;
+#     journald has no such cap, so the same code scanned multi-GB journals
+#     (2m12s runs, 734MB of logs/, observed on a real server). A week-long
+#     window keeps days-old crashes while staying finite. `docker logs` needs
+#     no window: that path only exists for json-file installs, where compose
+#     rotation already caps the size.
+#   - Announce every step BEFORE running it. A customer mid-outage reading a
+#     silent terminal assumes a hang and Ctrl-Cs, destroying the bundle.
+
+# Progress feedback. Each collector names itself before it runs and reports
+# its own elapsed seconds when it finishes, so whatever is taking the time
+# identifies itself instead of hiding behind a blank terminal.
+DIAGNOSE_STEP_TOTAL=20
+
+function diagnose_step_done() {
+  if [ -n "${DIAGNOSE_STEP_STARTED:-}" ]; then
+    printf ' done (%ss)\n' "$(( $(date +%s) - DIAGNOSE_STEP_STARTED ))"
+    DIAGNOSE_STEP_STARTED=""
+  fi
+  return 0
+}
+
+function diagnose_step() {
+  diagnose_step_done
+  DIAGNOSE_STEP_NO=$(( ${DIAGNOSE_STEP_NO:-0} + 1 ))
+  printf '  [%2d/%d] %s ...' "$DIAGNOSE_STEP_NO" "$DIAGNOSE_STEP_TOTAL" "$1"
+  DIAGNOSE_STEP_STARTED=$(date +%s)
+  return 0
+}
 
 # Ownership check for the permission doctor: install.sh chowns these paths
 # to broadcast:broadcast, and drift breaks pulls/backups in confusing ways.
@@ -35,17 +65,28 @@ function diagnose() {
   local bundle="$logs_root/diagnose-$timestamp"
   mkdir -p "$bundle"
 
+  DIAGNOSE_STEP_NO=0
+  DIAGNOSE_STEP_STARTED=""
+  local run_started
+  run_started=$(date +%s)
+
   echo -e "\e[33mCollecting diagnostic bundle in $bundle ...\e[0m"
 
-  # 1. Evidence first: full container logs, before anything can wipe them.
-  # Prefer the journal — with the journald logging driver it holds the full
-  # history INCLUDING containers a restart already removed, evidence
-  # `docker logs` can never see. Fall back to `docker logs` on installs
-  # whose containers still run the old json-file driver (empty journal).
+  # 1. Evidence first: container logs, before anything can wipe them.
+  # Prefer the journal — with the journald logging driver it holds history
+  # INCLUDING containers a restart already removed, evidence `docker logs`
+  # can never see. Bounded by time (see header): unbounded scans of a
+  # multi-GB journal are what made this step take minutes. Fall back to
+  # `docker logs` on installs whose containers still run the old json-file
+  # driver (empty journal), where compose rotation already caps the size.
   local container
+  local log_window="${DIAGNOSE_LOG_WINDOW:-7 days ago}"
+  echo "container logs captured with window: since $log_window" \
+    > "$bundle/log-capture.txt"
+  diagnose_step "container logs (slowest step on busy servers)"
   for container in app job postgres; do
-    journalctl CONTAINER_NAME="$container" --no-pager -o short-iso \
-      > "$bundle/$container.log" 2>/dev/null || true
+    journalctl CONTAINER_NAME="$container" --since "$log_window" \
+      --no-pager -o short-iso > "$bundle/$container.log" 2>/dev/null || true
     if ! grep -q . "$bundle/$container.log" 2>/dev/null; then
       docker logs "$container" > "$bundle/$container.log" 2>&1 \
         || echo "failed to capture $container logs" >> "$bundle/errors.txt"
@@ -54,6 +95,7 @@ function diagnose() {
 
   # 2. Filtered app log: strip Thruster access/proxy noise so Puma output
   # (crashes, exceptions) surfaces near the top of a support read
+  diagnose_step "filtered app and error logs"
   grep -viE '"msg":"Request"|Unable to proxy|TLS handshake' "$bundle/app.log" 2>/dev/null \
     | tail -200 > "$bundle/app-filtered.log" || true
 
@@ -64,11 +106,13 @@ function diagnose() {
   grep -iE "fatal|error|panic" "$bundle/postgres.log" 2>/dev/null \
     | tail -50 > "$bundle/postgres-errors.log" || true
 
+  diagnose_step "container and system state"
   # 3. Container and system state
   docker ps > "$bundle/docker-ps.txt" 2>&1 || true
   docker stats --no-stream > "$bundle/docker-stats.txt" 2>&1 || true
   { df -h 2>&1 || true; echo; free -m 2>&1 || true; echo; uptime 2>&1 || true; } > "$bundle/system.txt"
 
+  diagnose_step "kernel OOM check"
   # 4. Kernel OOM check: rules memory kills in or out immediately
   if ! journalctl -k --since "3 days ago" 2>/dev/null \
       | grep -iE "oom|out of memory" > "$bundle/oom.txt"; then
@@ -80,6 +124,7 @@ function diagnose() {
     domain=$(cat /opt/broadcast/.domain)
   fi
 
+  diagnose_step "identity and permission doctor"
   # 5. Who ran this, and is the installation shaped the way install.sh
   # leaves it (brew-doctor style: ok/WARN per check)
   {
@@ -109,6 +154,7 @@ function diagnose() {
     fi
   } > "$bundle/doctor.txt" 2>&1 || true
 
+  diagnose_step "system specs and time sync"
   # 6. System specs, OS, and time sync
   {
     echo "--- OS ---"
@@ -131,9 +177,24 @@ function diagnose() {
     uptime 2>&1 || true
     echo
     echo "--- Time sync (clock skew breaks email provider signatures) ---"
-    timedatectl 2>/dev/null | head -8 || true
+    # Observed on a real server: NTP inactive, printed without comment. Skew
+    # breaks provider request signatures, which surfaces as auth failures
+    # nobody connects back to the clock.
+    local timesync=""
+    timesync=$(timedatectl 2>/dev/null | head -8) || true
+    echo "$timesync"
+    case "$timesync" in
+      *"System clock synchronized: no"*)
+        echo "WARN: system clock is NOT synchronized — skew breaks email provider request signatures (fix: timedatectl set-ntp true)" ;;
+    esac
+    case "$timesync" in
+      *"NTP service: active"*) : ;;
+      *"NTP service:"*)
+        echo "WARN: NTP service is not active — the clock will drift unchecked (fix: timedatectl set-ntp true)" ;;
+    esac
   } > "$bundle/system.txt"
 
+  diagnose_step "top processes"
   # 7. What else is running on this host
   {
     echo "--- Top processes by memory ---"
@@ -143,6 +204,7 @@ function diagnose() {
     ps aux --sort=-%cpu 2>/dev/null | head -16 || true
   } > "$bundle/processes.txt"
 
+  diagnose_step "ports and firewall"
   # 8. Port listeners + firewall. A non-Docker process on 80/443 (customer
   # installed nginx/apache) silently steals traffic from Thruster.
   {
@@ -156,6 +218,7 @@ function diagnose() {
     echo "WARN: a non-Docker process is listening on port 80/443 (see listeners above) — another web server may be stealing Broadcast's traffic" >> "$bundle/ports.txt"
   fi
 
+  diagnose_step "SSL certificate"
   # 9. Live SSL certificate (SNI required — see header note on --resolve)
   if [ -n "$domain" ]; then
     echo | openssl s_client -servername "$domain" -connect 127.0.0.1:443 2>/dev/null \
@@ -165,6 +228,7 @@ function diagnose() {
     echo "no .domain configured; certificate check skipped" > "$bundle/ssl.txt"
   fi
 
+  diagnose_step "versions and container lifecycle"
   # 10. Versions and container lifecycle (restart counts and start times
   # date an incident: "recreated N days ago" was the timing clue in the
   # original outage)
@@ -184,6 +248,7 @@ function diagnose() {
     done
   } > "$bundle/versions.txt"
 
+  diagnose_step "job queue health"
   # 11. Job queue health, read via psql against the postgres container so a
   # wedged or dead app container cannot block queue inspection. "My emails
   # aren't sending" is the most common support opener; a deep ready queue
@@ -202,6 +267,7 @@ function diagnose() {
     esac
   } > "$bundle/queue.txt"
 
+  diagnose_step "database health and connection sources"
   # 12. Database health: pool exhaustion mimics an app hang, and pending
   # migrations after an upgrade/restore cause confusing partial failures
   local psql_primary="docker exec postgres psql -U broadcast -d broadcast_primary_production -t -A -c"
@@ -222,9 +288,14 @@ function diagnose() {
   # documents the intent and keeps this correct if that ever changes.
   db_gateway=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' postgres 2>/dev/null | tr -d '[:space:]') || true
   db_container_ips=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' app job postgres 2>/dev/null | tr '\n' ' ') || true
-  active_conns=$($psql_primary "SELECT COUNT(*) FROM pg_stat_activity" 2>/dev/null) || active_conns="unknown"
+  # `backend_type = 'client backend'` throughout: pg_stat_activity also lists
+  # background workers (checkpointer, autovacuum, walwriter) which hold no
+  # max_connections slot. Counting them overstates usage, skews the ceiling
+  # warning, and adds meaningless null-database rows to the breakdown.
+  local client_only="WHERE backend_type = 'client backend'"
+  active_conns=$($psql_primary "SELECT COUNT(*) FROM pg_stat_activity $client_only" 2>/dev/null) || active_conns="unknown"
   max_conns=$($psql_primary "SHOW max_connections" 2>/dev/null) || max_conns="unknown"
-  conn_sources=$($psql_primary "SELECT COALESCE(host(client_addr), 'local') || ' ' || COALESCE(datname, '-') || ' ' || COALESCE(state, '-') || ' ' || COUNT(*) FROM pg_stat_activity GROUP BY client_addr, datname, state ORDER BY COUNT(*) DESC" 2>/dev/null) || conn_sources=""
+  conn_sources=$($psql_primary "SELECT COALESCE(host(client_addr), 'local') || ' ' || COALESCE(datname, '-') || ' ' || COALESCE(state, '-') || ' ' || COUNT(*) FROM pg_stat_activity $client_only GROUP BY client_addr, datname, state ORDER BY COUNT(*) DESC" 2>/dev/null) || conn_sources=""
 
   {
     echo "active connections: $active_conns"
@@ -267,6 +338,7 @@ function diagnose() {
     fi
   } > "$bundle/database.txt"
 
+  diagnose_step "backup freshness"
   # 13. Backup freshness: a customer who believes they have backups but
   # whose newest one is months old is a disaster in waiting
   {
@@ -282,6 +354,7 @@ function diagnose() {
     fi
   } > "$bundle/backups.txt"
 
+  diagnose_step "disk attribution"
   # 14. Disk attribution: "disk 92% full" means nothing until you know
   # whether postgres, uploads, logs, or dead Docker images grew
   {
@@ -292,6 +365,7 @@ function diagnose() {
     echo "(Docker image usage is in versions.txt)"
   } > "$bundle/storage.txt"
 
+  diagnose_step "incident timeline"
   # 15. Incident timeline: upgrades, domain changes, reboots, failed
   # units, surprise unattended upgrades, and cgroup OOM kills (which the
   # kernel-journal check does not see)
@@ -318,6 +392,7 @@ function diagnose() {
     done
   } > "$bundle/timeline.txt"
 
+  diagnose_step "cron liveness"
   # 16. Cron liveness: dead cron means no monitoring, no triggers, no
   # updates — and nothing complains until the dashboard goes stale.
   # Heartbeat is app/monitor/system.json (rewritten every minute by the
@@ -342,6 +417,7 @@ function diagnose() {
     tail -20 /opt/broadcast/logs/cron/trigger.log 2>/dev/null || echo "(no trigger.log)"
   } > "$bundle/cron.txt"
 
+  diagnose_step "local customizations"
   # 16b. Local customizations: a hand-edited tracked file blocks every git
   # pull — nightly updates fail silently and upgrades abort (2026-08-04
   # incident, invisible in the bundle until this collector). The override
@@ -362,6 +438,7 @@ function diagnose() {
     fi
   } > "$bundle/customizations.txt"
 
+  diagnose_step "outbound network (SMTP probes can stall)"
   # 17. Outbound network: blocked egress fails silently, and cloud hosts
   # commonly block SMTP ports by default
   {
@@ -377,6 +454,7 @@ function diagnose() {
     done
   } > "$bundle/network.txt"
 
+  diagnose_step "health probes"
   # 18. Layered probes
   local puma_code thruster_code https_code="skipped"
   puma_code=$(docker exec app curl -s -o /dev/null -w "%{http_code}" -m 10 http://localhost:3000/up 2>/dev/null) || puma_code="000"
@@ -392,7 +470,10 @@ function diagnose() {
   } > "$bundle/probes.txt"
 
   # 6. Interpretation: name the layer that failed, and preserve the
-  # capture-before-restart discipline in the advice itself
+  # capture-before-restart discipline in the advice itself.
+  # Close the probe step first: the tee below writes to stdout, and without
+  # this it would land in the middle of the step's unterminated line.
+  diagnose_step_done
   {
     # Thruster 301 on plain HTTP is its normal redirect to HTTPS — proof it
     # is alive, not a failure (confirmed against a healthy real install).
@@ -417,8 +498,25 @@ function diagnose() {
   } | tee "$bundle/summary.txt"
 
   # 7. Single artifact for the support round-trip
+  diagnose_step "bundle tarball"
   tar -czf "$logs_root/diagnose-$timestamp.tar.gz" -C "$logs_root" "diagnose-$timestamp" \
     || echo -e "\e[31mCould not create the bundle tarball; the directory remains at $bundle\e[0m"
+
+  # Prune old bundles. Nothing ever removed them, and each one now carries a
+  # week of journal, so logs/ grew unbounded (734MB observed on a real
+  # server) — which then made the NEXT run slower. Sort by name, not mtime:
+  # the timestamp is in the name and sorts chronologically, whereas mtimes
+  # tie when several bundles are written in the same second.
+  local keep=3 stale
+  while IFS= read -r stale; do
+    [ -n "$stale" ] && rm -rf "$stale"
+  done < <(ls -d "$logs_root"/diagnose-*/ 2>/dev/null | sort -r | tail -n +$((keep + 1)))
+  while IFS= read -r stale; do
+    [ -n "$stale" ] && rm -f "$stale"
+  done < <(ls "$logs_root"/diagnose-*.tar.gz 2>/dev/null | sort -r | tail -n +$((keep + 1)))
+
+  diagnose_step_done
+  echo -e "\e[32mBundle collected in $(( $(date +%s) - run_started ))s\e[0m"
 
   # 8. Copy-paste report: customers paste far more reliably than they
   # attach files, so the common case must travel in the terminal output
@@ -475,7 +573,10 @@ function diagnose() {
   cat "$bundle/system.txt" 2>/dev/null || true
   echo
   echo "--- Top processes ---"
-  head -20 "$bundle/processes.txt" 2>/dev/null || true
+  # 40, not 20: processes.txt is the memory block (17 lines) then the CPU
+  # block, so head -20 stopped one line into the CPU header and that section
+  # printed empty in every real bundle.
+  head -40 "$bundle/processes.txt" 2>/dev/null || true
   echo
   echo "--- Kernel OOM check ---"
   head -20 "$bundle/oom.txt" 2>/dev/null || true
