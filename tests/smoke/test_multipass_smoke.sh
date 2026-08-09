@@ -114,6 +114,24 @@ vm_psql() {
     vm_exec_root "echo $b64 | base64 -d > /tmp/smoke_psql.sql && docker exec -i postgres psql -U broadcast -d $database -t -A -v ON_ERROR_STOP=1 < /tmp/smoke_psql.sql"
 }
 
+# Runs Ruby inside the app container through `rails runner -` (reads the
+# program from stdin). base64 for the same reason as vm_psql: vm_exec_root
+# wraps its command in single quotes.
+#
+# vm_rails_runner <ruby>
+# vm_rails_runner_timeout <seconds> <ruby>   -> exit 124 when it did not finish
+vm_rails_runner() {
+    local ruby="$1" b64
+    b64=$(printf '%s' "$ruby" | base64 | tr -d '\n')
+    vm_exec_root "echo $b64 | base64 -d | docker exec -i app bin/rails runner -"
+}
+
+vm_rails_runner_timeout() {
+    local secs="$1" ruby="$2" b64
+    b64=$(printf '%s' "$ruby" | base64 | tr -d '\n')
+    vm_exec_root "echo $b64 | base64 -d | timeout $secs docker exec -i app bin/rails runner -"
+}
+
 #######################
 # Credential Loading
 #######################
@@ -1307,6 +1325,88 @@ test_upgrade_preflight_and_session_sweep() {
     run_health_checks "Phase 7d (post-preflight)"
 }
 
+# Phase 7e: REPRODUCTION of the customer's hang, with its own control.
+#
+# Every other phase here checks that our machinery works. This one checks that
+# the failure we built the machinery for is real, and that the remedy changes
+# the outcome — which is the only thing that turns "all green" into evidence.
+#
+# The mechanism: a session holding ACCESS EXCLUSIVE on a table blocks every
+# other access to it, including plain SELECTs. Postgres has no lock_timeout by
+# default, so the blocked query waits forever. When the blocked query is the
+# migration Rails runs on app boot, the container never finishes starting and
+# the site never comes back — the "upgrade hangs" report.
+#
+# Note on scope: the smoke VM runs the PUBLISHED app image, so the
+# lock_timeout added to config/database.yml in the broadcast repo is not in it
+# until a new image ships. This phase therefore proves the mechanism and the
+# remedy directly (setting lock_timeout on the connection), and separately
+# reports whether the deployed image already carries it.
+test_lock_hang_reproduction() {
+    log_info "=== Phase 7e: Lock-wait hang reproduction (with control) ==="
+
+    log_info "Taking ACCESS EXCLUSIVE on subscribers from a detached session..."
+    vm_exec_root "docker exec -d postgres psql -U broadcast -d broadcast_primary_production -c \"BEGIN; LOCK TABLE subscribers IN ACCESS EXCLUSIVE MODE; SELECT pg_sleep(180);\"" || true
+    sleep 3
+
+    log_test "the blocking lock is actually held (guards the control below)"
+    local blockers
+    blockers=$(vm_psql broadcast_primary_production "SELECT COUNT(*) FROM pg_locks l JOIN pg_class c ON c.oid = l.relation WHERE c.relname = 'subscribers' AND l.mode = 'AccessExclusiveLock' AND l.granted;" | tr -dc '0-9')
+    if [ "${blockers:-0}" -ge 1 ]; then
+        log_success "ACCESS EXCLUSIVE held on subscribers"
+    else
+        log_fail "could not acquire the blocking lock — the control below would prove nothing"
+    fi
+
+    # CONTROL: without lock_timeout the app query never returns. `timeout`
+    # exits 124 when it had to kill it, which is the hang, observed.
+    log_test "CONTROL: without lock_timeout an app query hangs indefinitely"
+    local rc=0
+    vm_rails_runner_timeout 20 "ActiveRecord::Base.connection.execute(%q{SET lock_timeout = 0}); Subscriber.count" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 124 ]; then
+        log_success "reproduced: the query was still blocked after 20s (this is the customer's hang)"
+    else
+        log_fail "expected a hang (exit 124), got exit $rc — the reproduction is not valid on this system"
+    fi
+
+    # TREATMENT: the same query, same held lock, with lock_timeout set.
+    log_test "TREATMENT: with lock_timeout the same query fails fast instead"
+    local out
+    out=$(vm_rails_runner_timeout 40 "begin; ActiveRecord::Base.connection.execute(%q{SET lock_timeout = 5000}); Subscriber.count; puts %q{NO_ERROR}; rescue => e; puts %q{LOCK_ERROR }+e.class.name; end" 2>&1) || true
+    if echo "$out" | grep -q "LOCK_ERROR"; then
+        log_success "failed fast with a lock error instead of hanging: $(echo "$out" | grep LOCK_ERROR | head -1)"
+    else
+        log_fail "expected a lock error within the timeout, got: $out"
+    fi
+
+    # Does the DEPLOYED image already carry the database.yml lock_timeout?
+    # Informational until a new app image ships with it.
+    log_test "deployed app image carries a lock_timeout on its connections"
+    local shipped
+    # logger = nil, select_value, and tail -1: rails runner otherwise emits its
+    # SQL log line ("(16.9ms) SHOW lock_timeout") which concatenated with the
+    # value and made this check pass on a server that actually reported 0.
+    shipped=$(vm_rails_runner "ActiveRecord::Base.logger = nil; puts ActiveRecord::Base.connection.select_value(%q{SHOW lock_timeout})" 2>/dev/null | tail -1 | tr -d '[:space:]')
+    if [ -n "$shipped" ] && [ "$shipped" != "0" ]; then
+        log_success "app connections carry lock_timeout = $shipped"
+    else
+        log_info "app image reports lock_timeout = ${shipped:-<unreadable>} — expected until an image containing the database.yml change ships; the TREATMENT above shows the remedy works"
+        log_success "mechanism and remedy verified (shipped config pending a new app image)"
+    fi
+
+    log_info "Releasing the blocking lock..."
+    vm_psql broadcast_primary_production "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE backend_type = 'client backend' AND query LIKE '%ACCESS EXCLUSIVE%' AND pid <> pg_backend_pid();" || true
+
+    log_test "the app recovers once the lock is released"
+    if vm_rails_runner "puts Subscriber.count" >/dev/null 2>&1; then
+        log_success "queries flow again after the blocker is gone"
+    else
+        log_fail "app still cannot query subscribers after the lock was released"
+    fi
+
+    run_health_checks "Phase 7e (post-reproduction)"
+}
+
 # Shared streaming lifecycle assertions: start via trigger, survive container
 # recreation (reattach), and stop on trigger removal. Used by both the
 # behavioural (--test-upgrade) and genuine-upgrade (--test-real-upgrade) phases.
@@ -1560,6 +1660,7 @@ run_for_version() {
         test_upgrade_failure_failsafe
         test_upgrade_dirty_tree_protection
         test_upgrade_preflight_and_session_sweep
+        test_lock_hang_reproduction
     fi
 
     # Always last: changes the installation domain and restarts the stack
