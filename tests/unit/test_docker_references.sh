@@ -25,6 +25,17 @@ compose_container_names() {
     grep -E '^\s*container_name:' "$COMPOSE_FILE" | awk '{print $2}'
 }
 
+# One service's block, from "  <name>:" up to the next service key. Lets a test
+# assert that a setting belongs to the service that needs it, rather than
+# appearing anywhere in the file.
+compose_service_block() {
+    awk -v svc="  $1:" '
+        $0 == svc {in_b=1; next}
+        in_b && /^  [a-zA-Z0-9_-]+:$/ {exit}
+        in_b {print}
+    ' "$COMPOSE_FILE"
+}
+
 # Names scripts pass to docker-compose subcommands (exec/run/cp), which
 # resolve SERVICE names. Skips shell variables.
 script_service_references() {
@@ -136,6 +147,23 @@ test_postgres_has_a_shutdown_grace_period() {
         "postgres needs a stop_grace_period: a shutdown checkpoint on a large database exceeds the 10s default, so postgres is SIGKILLed into WAL crash recovery and the next boot stalls on an unhealthy healthcheck"
 }
 
+# Customer incident 2026-08-15: 1,253 SES webhooks arrived in 21 seconds, the
+# app exhausted the container's default file-descriptor limit, Puma logged
+# Errno::EMFILE from its listen loop, and the site served nothing but 502s for
+# 31 minutes until someone restarted it by hand — while the container reported
+# Running the whole time. Neither the Dockerfile nor this compose file set a
+# limit, so the containers inherited Docker's default. The behaviour is
+# reproduced in tests/integration/test_descriptor_exhaustion.sh.
+test_app_has_a_file_descriptor_limit() {
+    assert_contains "$(compose_service_block app)" "nofile" \
+        "app needs a nofile ulimit: a burst of webhooks exhausts Docker's default descriptor limit, and the process does not exit when it happens — the container keeps reporting healthy while serving nothing, so nothing recovers it automatically"
+}
+
+test_job_has_a_file_descriptor_limit() {
+    assert_contains "$(compose_service_block job)" "nofile" \
+        "job needs a nofile ulimit: bulk sending opens an outbound connection per message, so the worker faces the same descriptor ceiling as the app"
+}
+
 test_postgres_reaps_idle_transactions() {
     assert_contains "$(cat "$COMPOSE_FILE")" "idle_in_transaction_session_timeout" \
         "postgres needs idle_in_transaction_session_timeout: an abandoned remote transaction holds locks indefinitely and blocks the migration that runs on app boot"
@@ -147,6 +175,8 @@ run_docker_reference_tests() {
 
     init_test_framework
 
+    run_test "test_app_has_a_file_descriptor_limit" test_app_has_a_file_descriptor_limit
+    run_test "test_job_has_a_file_descriptor_limit" test_job_has_a_file_descriptor_limit
     run_test "test_postgres_has_a_shutdown_grace_period" test_postgres_has_a_shutdown_grace_period
     run_test "test_postgres_reaps_idle_transactions" test_postgres_reaps_idle_transactions
     run_test "test_compose_file_parses" test_compose_file_parses

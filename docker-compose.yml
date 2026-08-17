@@ -5,6 +5,22 @@ services:
     pull_policy: missing
     container_name: app
     restart: always
+    # Every in-flight request holds descriptors (the inbound socket, the proxied
+    # connection, the database socket), so a traffic burst is a descriptor burst.
+    # Docker's default ceiling is low enough that a webhook flood reaches it in
+    # seconds. The process does not exit when it does, so the container keeps
+    # reporting Running, restart: always never fires, and nothing recovers the
+    # site until the container is recreated.
+    #
+    # Customer incident 2026-08-15: 1,253 SES webhooks in 21 seconds (~65/s)
+    # exhausted the descriptors; Puma logged Errno::EMFILE from its listen loop
+    # and the site served nothing but 502s for 31 minutes, while every liveness
+    # signal on the box reported healthy. Reproduced by
+    # tests/integration/test_descriptor_exhaustion.sh.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     env_file:
       - /opt/broadcast/app/.env
     volumes:
@@ -34,6 +50,13 @@ services:
     pull_policy: missing
     container_name: job
     restart: always
+    # Bulk sending opens an outbound connection per message on top of its
+    # database sockets, so the worker meets the same ceiling as the app (see the
+    # app service above).
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     env_file:
       - /opt/broadcast/app/.env
     volumes:
