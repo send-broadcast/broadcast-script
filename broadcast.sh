@@ -31,6 +31,7 @@ function includeDependencies() {
   source "${current_dir}/scripts/diagnose.sh"
   source "${current_dir}/scripts/fix.sh"
   source "${current_dir}/scripts/health.sh"
+  source "${current_dir}/scripts/recover.sh"
   source "${current_dir}/scripts/trigger.sh"
   source "${current_dir}/scripts/update.sh"
   source "${current_dir}/scripts/logs.sh"
@@ -57,6 +58,7 @@ function display_help() {
   echo "  diagnose                 Collect a support diagnostic bundle (logs, probes, system state)"
   echo "  fix                      Repair installation drift (dirs, permissions, services, cron, keys)"
   echo "  health                   Report server health to the Broadcast dashboard (runs via cron)"
+  echo "  recover                  Restart the stack if Puma has stopped answering (runs via cron)"
   echo "  monitor-enable           Enable health reporting on this server and check in now"
   echo "  monitor-disable          Stop all health reporting from this server (zero phone-home)"
   echo "  trigger                  Automated check on triggers from Broadcast to the host"
@@ -183,6 +185,9 @@ main() {
       ;;
     health)
       health
+      ;;
+    recover)
+      recover
       ;;
     monitor-enable)
       monitor_enable

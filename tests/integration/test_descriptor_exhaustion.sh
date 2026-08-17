@@ -152,11 +152,33 @@ start_app_with_nofile() {
 # host. Its own nofile must be generous or the flooder hits the ceiling first
 # and never applies pressure to the app.
 start_flood() {
+    local hold="${1:-$FLOOD_HOLD_SECONDS}"
     docker run -d --rm --name broadcast-fd-test-flood --network "$NET" \
         --ulimit nofile=65536:65536 \
         -v "$TEST_DIR/fixtures/descriptor_flood.rb:/tmp/flood.rb:ro" \
         --entrypoint sh "$APP_IMAGE" \
-        -c "cd /rails && ruby /tmp/flood.rb $APP 80 $FLOOD_SOCKETS $FLOOD_HOLD_SECONDS" >/dev/null
+        -c "cd /rails && ruby /tmp/flood.rb $APP 80 $FLOOD_SOCKETS $hold" >/dev/null
+}
+
+# scripts/recover.sh writes its state and log under /opt/broadcast. Rewrite
+# those paths into a scratch directory so the test cannot touch a real install
+# on the machine running it. Only the path constants change; the decision logic
+# under test is the original text.
+prepare_recover_script() {
+    RECOVER_SANDBOX=$(mktemp -d)
+    mkdir -p "$RECOVER_SANDBOX/logs"
+    sed "s|/opt/broadcast|$RECOVER_SANDBOX|g" \
+        "$PROJECT_ROOT/scripts/recover.sh" > "$RECOVER_SANDBOX/recover.sh"
+}
+
+# One cron tick. Real docker, real probe against the real container -- only the
+# target container and the restart action are redirected at the test stack.
+run_recover_tick() {
+    (
+        # shellcheck disable=SC1090
+        source "$RECOVER_SANDBOX/recover.sh"
+        RECOVERY_CONTAINER="$APP" RECOVERY_COMMAND="docker restart $APP" recover
+    ) >>"$RECOVER_SANDBOX/recover-output.log" 2>&1 || true
 }
 
 stop_flood() {
@@ -252,6 +274,79 @@ test_treatment_high_limit_survives_the_same_flood() {
     stop_flood
 }
 
+# The whole point of scripts/recover.sh: the stack is broken in exactly the way
+# Docker cannot see, and something on the box notices and fixes it without a
+# human. This is the 31 minutes, closed.
+test_auto_recovery_restores_the_broken_stack() {
+    prepare_recover_script
+    start_app_with_nofile "$TREATMENT_NOFILE"
+
+    # Freeze Puma rather than flood it. Two reasons, both learned the hard way.
+    #
+    # First, a flood at these limits exhausts THRUSTER before Puma, so Puma keeps
+    # answering on :3000 and recovery correctly declines to act -- the earlier
+    # version of this test failed for exactly that reason. Production was the
+    # other way round because each webhook also opened an outbound connection to
+    # Amazon, which is what put the pressure on Puma.
+    #
+    # Second, a flood is released eventually and the stack comes back on its own,
+    # so "it is serving again" would pass without recover.sh doing anything. A
+    # stopped process never unfreezes itself, which makes the final assertion
+    # mean something.
+    #
+    # SIGSTOP reproduces the observable state that mattered: process alive,
+    # container Running, RestartCount 0, nothing served. -x matches the process
+    # NAME, because -f "puma" matches the shell running pkill and freezes it.
+    docker exec "$APP" pkill -STOP -x ruby >/dev/null 2>&1 || true
+    sleep 3
+
+    if serves_through_thruster; then
+        fail_test "the stack is still serving -- nothing to recover, the rest of this test would prove nothing"
+        return 0
+    fi
+    log_pass "stack is broken and not serving (precondition)"
+
+    if app_is_running && [ "$(app_restart_count)" = "0" ]; then
+        log_pass "and Docker still reports it healthy: Running, RestartCount 0 (the 2026-08-15 signature)"
+    else
+        fail_test "the container exited or restarted; then Docker would have recovered it and recovery would be unnecessary"
+    fi
+
+    # Two ticks must NOT act: hysteresis is what stops an ordinary deploy blip
+    # from becoming a self-inflicted restart.
+    run_recover_tick
+    run_recover_tick
+    if grep -q "RECOVERY" "$RECOVER_SANDBOX/logs/recovery.log" 2>/dev/null; then
+        fail_test "recovery acted after two failed probes; hysteresis requires three"
+    else
+        log_pass "two failed probes did not trigger a restart (hysteresis)"
+    fi
+
+    # Nothing has healed on its own, so what happens next is attributable.
+    if serves_through_thruster; then
+        fail_test "the stack recovered by itself before recovery acted; the next assertion would prove nothing"
+        return 0
+    fi
+
+    # The third tick is the one that acts.
+    run_recover_tick
+
+    if grep -q "RECOVERY" "$RECOVER_SANDBOX/logs/recovery.log" 2>/dev/null; then
+        log_pass "third failed probe triggered recovery and recorded it for admins"
+    else
+        fail_test "recovery never fired: $(tail -3 "$RECOVER_SANDBOX/recover-output.log" 2>/dev/null)"
+    fi
+
+    if wait_for "the stack to serve again after recovery" \
+        "curl -sf -o /dev/null -m 5 http://127.0.0.1:${HOST_PORT}/up" 40 3; then
+        log_pass "site is serving again, restored with no human involved (the 31 minutes, closed)"
+    else
+        fail_test "the stack never came back after recovery restarted it"
+    fi
+
+    rm -rf "$RECOVER_SANDBOX"
+}
+
 # The limit compose declares must survive into the running container. The unit
 # test asserts the YAML says "nofile"; this asserts the kernel agrees.
 test_compose_declared_limit_reaches_the_container() {
@@ -282,6 +377,7 @@ run_descriptor_exhaustion_tests() {
     run_test "test_compose_declared_limit_reaches_the_container" test_compose_declared_limit_reaches_the_container
     run_test "test_control_low_limit_exhausts_and_still_reports_healthy" test_control_low_limit_exhausts_and_still_reports_healthy
     run_test "test_treatment_high_limit_survives_the_same_flood" test_treatment_high_limit_survives_the_same_flood
+    run_test "test_auto_recovery_restores_the_broken_stack" test_auto_recovery_restores_the_broken_stack
 
     local result
     print_test_summary

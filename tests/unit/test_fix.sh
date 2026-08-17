@@ -216,7 +216,7 @@ test_fix_adds_missing_cron_entries_once() {
 
     assert_file_exists "$SANDBOX_ROOT/crontab.txt" "crontab must be installed"
     local cmd count
-    for cmd in monitor trigger health update; do
+    for cmd in monitor trigger health recover update; do
         count=$(/usr/bin/grep -c "broadcast.sh $cmd" "$SANDBOX_ROOT/crontab.txt")
         assert_equals "1" "$count" "cron entry for '$cmd' must exist exactly once after two runs"
     done
@@ -493,8 +493,8 @@ test_fix_reports_clean_on_healthy_system() {
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-post-upgrade-cleanup.service"
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-logs-watcher.service"
     echo "broadcast ALL=(ALL) NOPASSWD:ALL" > "$SANDBOX_ROOT/etc/sudoers.d/broadcast"
-    printf '* * * * * %s/broadcast.sh monitor\n* * * * * %s/broadcast.sh trigger\n* * * * * %s/broadcast.sh health\n0 0 * * * %s/broadcast.sh update\n' \
-        "$SANDBOX_ROOT" "$SANDBOX_ROOT" "$SANDBOX_ROOT" "$SANDBOX_ROOT" > "$SANDBOX_ROOT/crontab.txt"
+    printf '* * * * * %s/broadcast.sh monitor\n* * * * * %s/broadcast.sh trigger\n* * * * * %s/broadcast.sh health\n* * * * * %s/broadcast.sh recover\n0 0 * * * %s/broadcast.sh update\n' \
+        "$SANDBOX_ROOT" "$SANDBOX_ROOT" "$SANDBOX_ROOT" "$SANDBOX_ROOT" "$SANDBOX_ROOT" > "$SANDBOX_ROOT/crontab.txt"
     cat >> "$SANDBOX_ROOT/app/.env" <<'ENV'
 ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=x
 ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=y

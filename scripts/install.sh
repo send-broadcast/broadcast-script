@@ -174,6 +174,7 @@ EOF
   (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh monitor >> /opt/broadcast/logs/cron/monitor.log 2>&1") | crontab -
   (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh trigger >> /opt/broadcast/logs/cron/trigger.log 2>&1") | crontab -
   (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh health >> /opt/broadcast/logs/cron/health.log 2>&1") | crontab -
+  (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh recover >> /opt/broadcast/logs/cron/recover.log 2>&1") | crontab -
   (crontab -l 2>/dev/null || true; echo "0 0 * * * /opt/broadcast/broadcast.sh update >> /opt/broadcast/logs/cron/update.log 2>&1") | crontab -
 
   echo -e "\e[33mSetting permissions (double checking)...\e[0m"

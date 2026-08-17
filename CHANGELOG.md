@@ -10,6 +10,13 @@ release cadence begins, dated version sections will be promoted from this list.
 
 ## [Unreleased]
 
+### Added
+- **The server now restarts itself when the app stops answering.** A new `./broadcast.sh recover` runs from cron every minute, probes Puma directly, and restarts the stack after three consecutive failures. This closes the gap that made the 2026-08-15 incident 31 minutes long rather than three: the app had stopped serving while its process was still alive, so the container stayed `Running`, `restart: always` never fired, and every signal Docker exposes said healthy. The only thing on the box that could see the failure was a direct Puma probe, which until now reported it to a dashboard and did nothing about it.
+
+  Deliberate properties: three consecutive failures before acting, so a deploy blip or a slow boot never triggers a restart; at most one restart per 15 minutes, so a server that cannot stay up is restarted rather than flapped; and it is **independent of health monitoring** — recovery is local and phones nobody, so an install that opted out of telemetry still recovers itself. Operators who want to be the only thing that restarts their server can create `/opt/broadcast/.no_auto_recovery`.
+
+  Every recovery is recorded in `/opt/broadcast/logs/recovery.log` (collected by `diagnose`) through a single notification seam, so admin alerting can be added later without touching the decision logic. Existing installs pick up the cron entry from `./broadcast.sh fix`.
+
 ### Fixed
 - The `app` and `job` containers now run with a file-descriptor limit of 65536 instead of inheriting Docker's default. Every in-flight request holds several descriptors (inbound socket, proxied connection, database socket), so sustained traffic is sustained descriptor pressure. A customer install ran out on 2026-08-15 when a campaign send produced 1,253 Amazon SES webhooks in 21 seconds: Puma logged `Errno::EMFILE: Too many open files - accept(2)` from its listen loop, the app stopped serving, and the site returned nothing but 502s for 31 minutes until an operator restarted it by hand.
 
