@@ -15,6 +15,7 @@ CLAUDE.md
 REVIEW.md
 tests/fixtures/*
 !tests/fixtures/seed_data.sql
+!tests/fixtures/descriptor_flood.rb
 tests/.tmp*
 tests/smoke/.smoke-test.env
 tests/smoke/.vagrant-smoke*

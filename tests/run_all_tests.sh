@@ -153,8 +153,13 @@ run_integration_tests() {
     # PostgreSQL container, so it needs a working Docker daemon.
     if docker info >/dev/null 2>&1; then
         run_test_suite "Backup/Restore (Docker)" "$SCRIPT_DIR/integration/test_backup_restore.sh"
+        # Boots the real app image under Thruster + Puma against a disposable
+        # PostgreSQL and floods it. Skips itself when the private app image is
+        # not present locally.
+        run_test_suite "Descriptor Exhaustion (Docker)" "$SCRIPT_DIR/integration/test_descriptor_exhaustion.sh"
     else
         echo -e "${YELLOW}⊘ SKIP: Backup/Restore (Docker) — Docker daemon not available${NC}"
+        echo -e "${YELLOW}⊘ SKIP: Descriptor Exhaustion (Docker) — Docker daemon not available${NC}"
         echo
     fi
 }
