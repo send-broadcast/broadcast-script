@@ -130,11 +130,15 @@ start_postgres() {
 }
 
 # Boots the app exactly as production does: `thrust bin/rails server`, which is
-# the image's own CMD, with Thruster on 80 in front of Puma on 3000.
+# the image's own CMD, with Thruster on 80 in front of Puma on 3000, and the
+# same restart policy compose sets. The policy matters to the control test: its
+# RestartCount assertion claims "the policy was armed and never fired", which
+# is only a claim at all if the policy is actually present.
 start_app_with_nofile() {
     local limit="$1"
     docker rm -f "$APP" >/dev/null 2>&1 || true
     docker run -d --name "$APP" --network "$NET" \
+        --restart always \
         --ulimit "nofile=${limit}:${limit}" \
         -p "${HOST_PORT}:80" \
         -e RAILS_ENV=production \
@@ -251,12 +255,18 @@ test_control_low_limit_exhausts_and_still_reports_healthy() {
     if app_is_running; then
         log_pass "container still reports Running while serving nothing (why nobody noticed for 31 minutes)"
     else
-        echo "FAIL: container exited -- then restart:always would have recovered it, which is not what happened"
+        echo "FAIL: container not Running under the flood -- the incident's process never died, so this reproduction no longer matches it"
         TEST_FAILED=true
     fi
 
+    # The container runs with restart: always, as production does
+    # (start_app_with_nofile sets it). Running + RestartCount 0 is therefore
+    # the incident's signature, not a tautology: the policy was armed and never
+    # fired because the process never exited -- which is exactly why external
+    # recovery had to exist. If the process HAD died, the policy would have
+    # restarted it and this count would be non-zero.
     assert_equals "0" "$(app_restart_count)" \
-        "Docker's restart policy must not have fired -- it never did during the incident"
+        "restart: always fired, so the process died -- that is a different failure mode than the incident's"
 
     stop_flood
 }
@@ -408,6 +418,16 @@ test_does_not_restart_a_container_that_is_still_booting() {
         log_pass "left the freshly started container alone"
     fi
 
+    # Positive control for the negative above. A recover.sh that dies on load
+    # also leaves recovery.log empty, and "did not act" would pass while
+    # guarding nothing. The boot-grace path announces itself, so demand that
+    # announcement as proof the ticks actually ran and took THIS branch.
+    if grep -q "still booting" "$RECOVER_SANDBOX/recover-output.log" 2>/dev/null; then
+        log_pass "and the ticks demonstrably ran: the boot-grace hold announced itself"
+    else
+        fail_test "no evidence the ticks executed the boot-grace path -- the negative assertion above is vacuous"
+    fi
+
     rm -rf "$RECOVER_SANDBOX"
 }
 
@@ -436,16 +456,48 @@ test_does_not_act_while_the_container_is_absent() {
         log_pass "left the absent container alone (upgrade owns that window)"
     fi
 
+    # Positive control. The absent-container guard is silent but writes the
+    # state file on every tick; a recover.sh that failed to load would leave
+    # no state file, and the negative above would pass vacuously.
+    if [ -f "$RECOVER_SANDBOX/.recovery_state" ]; then
+        log_pass "and the ticks demonstrably ran: the guard wrote its state file"
+    else
+        fail_test "no state file after six ticks -- recover.sh never actually executed, the negative assertion above is vacuous"
+    fi
+
     rm -rf "$RECOVER_SANDBOX"
 }
 
-# The limit compose declares must survive into the running container. The unit
-# test asserts the YAML says "nofile"; this asserts the kernel agrees.
-test_compose_declared_limit_reaches_the_container() {
-    local declared
-    declared=$(grep -A2 'nofile:' "$PROJECT_ROOT/docker-compose.yml" | grep -m1 'soft:' | awk '{print $2}')
-    assert_equals "$TREATMENT_NOFILE" "$declared" \
-        "docker-compose.yml must declare the same limit this suite proves sufficient"
+# Compose is the mechanism that actually delivers the limit in production, and
+# no other test exercises it: the unit suite greps the YAML text, and
+# test_recovery_hardening.sh proves `docker run --ulimit` reaches the kernel --
+# neither runs the file through compose itself. Rendering via `docker compose
+# config` asserts what the greps cannot: that BOTH fields, for BOTH services,
+# survive into the effective configuration compose applies (a value edited in
+# one service, or a hard: dropped in a merge, still greps clean elsewhere), and
+# that the file is structurally valid at test time instead of at deploy time.
+# The env_file paths are rewritten into a scratch dir because they only exist
+# on a real install; that rewrite does not touch the ulimits under test.
+test_compose_renders_both_limits_for_both_services() {
+    local sandbox rendered
+    sandbox=$(mktemp -d)
+    mkdir -p "$sandbox/app" "$sandbox/db"
+    touch "$sandbox/app/.env" "$sandbox/db/.env"
+    sed "s|/opt/broadcast|$sandbox|g" "$PROJECT_ROOT/docker-compose.yml" \
+        > "$sandbox/docker-compose.yml"
+
+    if ! rendered=$(docker compose -f "$sandbox/docker-compose.yml" config 2>/dev/null); then
+        fail_test "docker compose could not render docker-compose.yml at all"
+        rm -rf "$sandbox"
+        return 0
+    fi
+
+    assert_equals "2" "$(echo "$rendered" | grep -c "soft: $TREATMENT_NOFILE")" \
+        "app and job must both carry soft nofile $TREATMENT_NOFILE in the config compose actually applies"
+    assert_equals "2" "$(echo "$rendered" | grep -c "hard: $TREATMENT_NOFILE")" \
+        "app and job must both carry hard nofile $TREATMENT_NOFILE in the config compose actually applies"
+
+    rm -rf "$sandbox"
 }
 
 #######################
@@ -466,7 +518,7 @@ run_descriptor_exhaustion_tests() {
 
     start_postgres
 
-    run_test "test_compose_declared_limit_reaches_the_container" test_compose_declared_limit_reaches_the_container
+    run_test "test_compose_renders_both_limits_for_both_services" test_compose_renders_both_limits_for_both_services
     run_test "test_control_low_limit_exhausts_and_still_reports_healthy" test_control_low_limit_exhausts_and_still_reports_healthy
     run_test "test_treatment_high_limit_survives_the_same_flood" test_treatment_high_limit_survives_the_same_flood
     run_test "test_auto_recovery_restores_the_broken_stack" test_auto_recovery_restores_the_broken_stack
