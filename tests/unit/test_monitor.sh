@@ -29,6 +29,12 @@ else
 fi'
     # monitor() writes through `su - broadcast -c "<cmd>"`; execute the
     # command string so the redirect into app/monitor/system.json happens.
+    # docker: fd count for the app container's processes, and the soft limit
+    harness_mock docker 'case "$*" in
+  *proc*fd*) echo 412 ;;
+  *ulimit*) echo 65536 ;;
+esac
+exit 0'
     harness_mock su 'bash -c "${@: -1}"'
 }
 
@@ -65,6 +71,28 @@ test_monitor_reports_expected_metrics() {
     assert_equals "60" "$(jq -r .disk_space_free_percent "$MONITOR_JSON")" \
         "disk free percent should be 100 minus df use%"
     assert_equals "2.1.0" "$(jq -r .current_version "$MONITOR_JSON")" "version from .current_version"
+}
+
+# The 2026-08-15 outage was file-descriptor exhaustion in the app process, and
+# nothing on the box recorded fd usage -- so we could not tell a burst that
+# exhausted a low ceiling from a slow leak that had been climbing for days. The
+# daily 09:00 UTC webhook burst means a per-burst leak shows as a step change
+# within a day or two, but only if something is counting.
+test_monitor_reports_app_file_descriptors() {
+    sandbox_run "monitor" >/dev/null
+
+    assert_equals "412" "$(jq -r .app_open_files "$MONITOR_JSON")" \
+        "open descriptor count for the app container must be recorded"
+    assert_equals "65536" "$(jq -r .app_open_files_limit "$MONITOR_JSON")" \
+        "the ceiling must be recorded too -- a count means nothing without it"
+}
+
+test_monitor_reports_unknown_descriptors_when_the_container_is_down() {
+    harness_mock docker 'exit 1'
+    sandbox_run "monitor" >/dev/null
+
+    assert_equals "0" "$(jq -r .app_open_files "$MONITOR_JSON")" \
+        "an unreachable container must not break the metrics file"
 }
 
 test_monitor_reports_unknown_version_without_version_file() {
@@ -117,6 +145,8 @@ run_monitor_tests() {
 
     run_test "test_monitor_writes_valid_json" test_monitor_writes_valid_json
     run_test "test_monitor_reports_expected_metrics" test_monitor_reports_expected_metrics
+    run_test "test_monitor_reports_app_file_descriptors" test_monitor_reports_app_file_descriptors
+    run_test "test_monitor_reports_unknown_descriptors_when_the_container_is_down" test_monitor_reports_unknown_descriptors_when_the_container_is_down
     run_test "test_monitor_reports_unknown_version_without_version_file" test_monitor_reports_unknown_version_without_version_file
     run_test "test_monitor_writes_as_broadcast_user" test_monitor_writes_as_broadcast_user
     run_test "test_monitor_prints_metrics_when_run_interactively" test_monitor_prints_metrics_when_run_interactively

@@ -158,9 +158,11 @@ run_integration_tests() {
         # PostgreSQL and floods it. Skips itself when the private app image is
         # not present locally.
         run_test_suite "Descriptor Exhaustion (Docker)" "$SCRIPT_DIR/integration/test_descriptor_exhaustion.sh"
+        run_test_suite "Recovery Hardening (Docker)" "$SCRIPT_DIR/integration/test_recovery_hardening.sh"
     else
         echo -e "${YELLOW}⊘ SKIP: Backup/Restore (Docker) — Docker daemon not available${NC}"
         echo -e "${YELLOW}⊘ SKIP: Descriptor Exhaustion (Docker) — Docker daemon not available${NC}"
+        echo -e "${YELLOW}⊘ SKIP: Recovery Hardening (Docker) — Docker daemon not available${NC}"
         echo
     fi
 }

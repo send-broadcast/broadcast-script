@@ -738,6 +738,19 @@ test_diagnose_cron_section_tails_update_and_trigger_logs() {
     assert_contains "$cron" "upgrade triggered" "the trigger.log tail must be captured"
 }
 
+# The 2026-08-15 outage was descriptor exhaustion, and the bundle collected to
+# diagnose it recorded no descriptor data at all -- the count, the ceiling, and
+# how close one is to the other were all invisible to support.
+test_diagnose_reports_file_descriptor_usage() {
+    sandbox_run "diagnose" >/dev/null
+
+    local dir versions
+    dir=$(bundle_dir)
+    versions=$(cat "${dir}versions.txt")
+    assert_contains "$versions" "open files" \
+        "the bundle must record descriptor usage against its limit"
+}
+
 test_diagnose_reports_auto_recovery_activity() {
     # A server that has been restarting itself is the single most important
     # thing support can know before reading anything else, and the operator
@@ -919,6 +932,7 @@ run_diagnose_tests() {
     run_test "test_diagnose_records_timeline" test_diagnose_records_timeline
     run_test "test_diagnose_cron_liveness_keys_off_monitor_heartbeat" test_diagnose_cron_liveness_keys_off_monitor_heartbeat
     run_test "test_diagnose_cron_section_tails_update_and_trigger_logs" test_diagnose_cron_section_tails_update_and_trigger_logs
+    run_test "test_diagnose_reports_file_descriptor_usage" test_diagnose_reports_file_descriptor_usage
     run_test "test_diagnose_reports_auto_recovery_activity" test_diagnose_reports_auto_recovery_activity
     run_test "test_diagnose_notes_when_auto_recovery_is_disabled" test_diagnose_notes_when_auto_recovery_is_disabled
     run_test "test_diagnose_captures_local_customizations" test_diagnose_captures_local_customizations

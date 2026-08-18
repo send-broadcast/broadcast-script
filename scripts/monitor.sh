@@ -14,6 +14,21 @@ function monitor() {
     disk_free_percent=$(df -h / | awk 'NR==2 {print $5}' | tr -d '%')
     disk_free_percent=$(echo "100 - $disk_free_percent" | bc)
 
+    # File descriptors held by the app container, and its ceiling.
+    #
+    # The 2026-08-15 outage was fd exhaustion inside the app process while every
+    # other signal read healthy, and nothing on the box was counting -- so we
+    # could not distinguish a burst that exhausted a low limit from a slow leak
+    # that had been climbing for days. Cheap to collect (two docker execs a
+    # minute) and it answers that question retroactively for every install.
+    #
+    # Counted across all processes in the container, not just PID 1: Thruster is
+    # PID 1 and Puma is its child, and it was Puma's table that filled.
+    app_open_files=$(docker exec app sh -c 'ls /proc/[0-9]*/fd 2>/dev/null | grep -c .' 2>/dev/null | tail -1)
+    [ -z "$app_open_files" ] && app_open_files=0
+    app_open_files_limit=$(docker exec app sh -c 'ulimit -n' 2>/dev/null | tail -1)
+    [ -z "$app_open_files_limit" ] && app_open_files_limit=0
+
     # Get current version
     current_version="unknown"
     if [ -f "/opt/broadcast/.current_version" ]; then
@@ -31,6 +46,8 @@ function monitor() {
     "disk_space_total": $disk_total,
     "disk_space_used": $disk_used,
     "disk_space_free_percent": $disk_free_percent,
+    "app_open_files": $app_open_files,
+    "app_open_files_limit": $app_open_files_limit,
     "current_version": "$current_version"
 }
 EOF

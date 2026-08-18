@@ -262,6 +262,67 @@ test_a_restarted_container_gets_a_fresh_boot_grace() {
         "the container recovery just restarted must get its own boot grace"
 }
 
+# --- robustness ------------------------------------------------------------
+#
+# cron fires this every minute and a probe can take 10s, so ticks can overlap.
+# The state file is written atomically (tmp+mv) but read-modify-write is not:
+# two overlapping runs can both read failures=2, both pass the cooldown check
+# against the same stale last_recovery_at, and both restart.
+#
+# flock and timeout are mocked rather than exercised for real: neither exists on
+# macOS, and the harness stubs sleep to a no-op, so a genuine lock-contention or
+# hang cannot be simulated here. Mocking them tests the decision this script
+# makes, which is the part we own.
+
+test_a_tick_does_nothing_while_another_holds_the_lock() {
+    settle_container
+    run_probes 000 2
+
+    # flock -n exits non-zero when another tick already holds the lock.
+    harness_mock flock 'exit 1'
+    run_probes 000 3
+
+    assert_equals "0" "$(restarts_logged)" \
+        "a tick that cannot take the lock must do nothing, or two overlapping ticks double-restart"
+}
+
+test_a_tick_acts_normally_when_it_takes_the_lock() {
+    settle_container
+    harness_mock flock 'exit 0'
+    run_probes 000 3
+
+    assert_equals "1" "$(restarts_logged)" \
+        "locking must not swallow the case recovery exists for"
+}
+
+# A wedged dockerd hangs the probe forever while cron stacks another tick every
+# minute. Only the inner curl had a timeout; docker itself had none.
+test_docker_calls_are_wrapped_in_a_timeout() {
+    harness_mock timeout 'shift; exec "$@"'
+    run_probes 200 1
+
+    harness_assert_called "timeout" \
+        "docker calls must be bounded, or one wedged dockerd hangs every future tick"
+}
+
+# "curl is missing from the image" and "Puma is dead" both surface as 000. Only
+# one of them should ever trigger a restart -- otherwise a perfectly healthy box
+# is restarted every 15 minutes, forever.
+test_a_missing_probe_binary_never_triggers_a_restart() {
+    settle_container
+    # 127 = command not found, which is what docker exec returns for it.
+    harness_mock docker 'case "$*" in
+  *inspect*State.Running*) printf "true" ;;
+  *inspect*State.StartedAt*) printf "2026-08-01T00:00:00Z" ;;
+  *exec*) exit 127 ;;
+esac
+exit 0'
+    run_probes 000 6
+
+    assert_equals "0" "$(restarts_logged)" \
+        "a missing probe binary is a broken probe, not a broken app; restarting on it loops forever on a healthy box"
+}
+
 #######################
 # Runner
 #######################
@@ -292,6 +353,10 @@ run_recovery_tests() {
     run_test "test_does_not_act_within_the_boot_grace_of_a_new_container" test_does_not_act_within_the_boot_grace_of_a_new_container
     run_test "test_acts_once_the_boot_grace_has_passed" test_acts_once_the_boot_grace_has_passed
     run_test "test_a_restarted_container_gets_a_fresh_boot_grace" test_a_restarted_container_gets_a_fresh_boot_grace
+    run_test "test_a_tick_does_nothing_while_another_holds_the_lock" test_a_tick_does_nothing_while_another_holds_the_lock
+    run_test "test_a_tick_acts_normally_when_it_takes_the_lock" test_a_tick_acts_normally_when_it_takes_the_lock
+    run_test "test_docker_calls_are_wrapped_in_a_timeout" test_docker_calls_are_wrapped_in_a_timeout
+    run_test "test_a_missing_probe_binary_never_triggers_a_restart" test_a_missing_probe_binary_never_triggers_a_restart
 
     local result
     print_test_summary

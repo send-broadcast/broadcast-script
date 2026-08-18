@@ -246,6 +246,23 @@ function diagnose() {
     for c in app job postgres; do
       docker inspect --format "{{.Name}}: restarts={{.RestartCount}} started={{.State.StartedAt}}" "$c" 2>/dev/null || true
     done
+    echo
+    # Descriptor usage against its ceiling. The 2026-08-15 outage was exhaustion
+    # inside the app process while every other signal read healthy, and this
+    # bundle recorded nothing about it. A count climbing across successive
+    # bundles is also the only way to tell a leak from a burst.
+    echo "--- Open files (descriptor exhaustion took a customer down on 2026-08-15) ---"
+    local fd_used fd_limit
+    for c in app job; do
+      fd_used=$(docker exec "$c" sh -c 'ls /proc/[0-9]*/fd 2>/dev/null | grep -c .' 2>/dev/null | tail -1)
+      fd_limit=$(docker exec "$c" sh -c 'ulimit -n' 2>/dev/null | tail -1)
+      echo "$c: open files ${fd_used:-unknown} of ${fd_limit:-unknown}"
+      if [ -n "$fd_used" ] && [ -n "$fd_limit" ] && [ "$fd_limit" -gt 0 ] 2>/dev/null; then
+        if [ "$((fd_used * 100 / fd_limit))" -ge 70 ]; then
+          echo "WARN: $c is at $((fd_used * 100 / fd_limit))% of its descriptor limit — at the ceiling Puma stops accepting connections while the container still reports healthy"
+        fi
+      fi
+    done
   } > "$bundle/versions.txt"
 
   diagnose_step "job queue health"

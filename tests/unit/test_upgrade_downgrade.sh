@@ -177,6 +177,24 @@ test_upgrade_continue_adds_health_cron_for_older_installs() {
         "existing cron entries must survive"
 }
 
+test_upgrade_continue_adds_recover_cron_for_older_installs() {
+    # Auto-recovery is worthless if it is never scheduled. install.sh and fix
+    # add the cron entry, but fix is a manual support command -- so without
+    # this the customer whose outage motivated recover.sh would upgrade and
+    # still have nothing restarting their server.
+    echo "* * * * * $SANDBOX_ROOT/broadcast.sh monitor" > "$SANDBOX_ROOT/crontab.txt"
+
+    sandbox_run "_upgrade_continue 2.5.0" >/dev/null
+    sandbox_run "_upgrade_continue 2.5.0" >/dev/null
+
+    local count
+    count=$(/usr/bin/grep -c "broadcast.sh recover" "$SANDBOX_ROOT/crontab.txt")
+    assert_equals "1" "$count" \
+        "the recover cron entry must be added exactly once across upgrades"
+    assert_contains "$(cat "$SANDBOX_ROOT/crontab.txt")" "broadcast.sh monitor" \
+        "existing cron entries must survive"
+}
+
 test_upgrade_continue_refreshes_stale_broadcast_unit() {
     # The unit file is written once at install; existing servers kept the
     # pre-incident template (no RestartSec / StartLimitIntervalSec /
@@ -375,6 +393,7 @@ run_upgrade_downgrade_tests() {
     run_test "test_upgrade_continue_adds_encryption_keys_when_missing" test_upgrade_continue_adds_encryption_keys_when_missing
     run_test "test_upgrade_continue_preserves_existing_encryption_keys" test_upgrade_continue_preserves_existing_encryption_keys
     run_test "test_upgrade_continue_adds_health_cron_for_older_installs" test_upgrade_continue_adds_health_cron_for_older_installs
+    run_test "test_upgrade_continue_adds_recover_cron_for_older_installs" test_upgrade_continue_adds_recover_cron_for_older_installs
     run_test "test_upgrade_continue_refreshes_stale_broadcast_unit" test_upgrade_continue_refreshes_stale_broadcast_unit
     run_test "test_upgrade_continue_leaves_current_broadcast_unit_alone" test_upgrade_continue_leaves_current_broadcast_unit_alone
     run_test "test_downgrade_continue_full_sequence" test_downgrade_continue_full_sequence

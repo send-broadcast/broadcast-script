@@ -34,6 +34,22 @@ RECOVERY_DEFAULT_COMMAND="systemctl restart broadcast"
 # rebuilding an index on a large table -- not the ordinary one.
 RECOVERY_BOOT_GRACE_PROBES=10
 
+# Ceiling on any single docker call. A wedged dockerd otherwise hangs a tick
+# forever while cron starts another every minute; only the inner curl was
+# bounded before.
+RECOVERY_DOCKER_TIMEOUT=30
+
+# Runs a command under timeout(1) when it exists. Minimal images and macOS
+# (where the unit tests run) have no timeout; there the command runs unbounded,
+# which is what happened everywhere before this existed.
+_recovery_bounded() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$RECOVERY_DOCKER_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
+
 # EXTENSION POINT — admin alerting.
 #
 # Today this writes a local line to /opt/broadcast/logs/recovery.log, which is
@@ -80,6 +96,19 @@ function recover() {
     return 0
   fi
 
+  # cron fires every minute and a probe can take up to RECOVERY_DOCKER_TIMEOUT,
+  # so ticks can overlap. State writes are atomic (tmp+mv) but read-modify-write
+  # is not: two overlapping ticks can both read failures=2, both pass the
+  # cooldown check against the same last_recovery_at, and both restart. Whoever
+  # holds the lock owns this tick; the loser does nothing and tries next minute.
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>"$state_file.lock" 2>/dev/null || true
+    if ! flock -n 9; then
+      echo "[$(date)] recovery: another tick is still running; skipping"
+      return 0
+    fi
+  fi
+
   local now
   now=$(date +%s)
 
@@ -106,7 +135,7 @@ function recover() {
   # incident this exists for looked nothing like it: the container was Running
   # the entire time.
   local running
-  running=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null) || running=""
+  running=$(_recovery_bounded docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null) || running=""
   if [ "$running" != "true" ]; then
     consecutive_failures=0
     probes_since_start=0
@@ -122,7 +151,7 @@ function recover() {
   # starts again. That also stops recovery restarting the container it just
   # restarted.
   local started_at
-  started_at=$(docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null) || started_at=""
+  started_at=$(_recovery_bounded docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null) || started_at=""
   if [ "$started_at" != "$container_started_at" ]; then
     container_started_at="$started_at"
     consecutive_failures=0
@@ -132,9 +161,20 @@ function recover() {
 
   # The probe that saw the outage. Not through Thruster: Thruster answers 502
   # perfectly happily while there is nothing behind it.
-  local puma
-  puma=$(docker exec "$container" curl -s -o /dev/null \
-    -w "%{http_code}" -m 10 http://localhost:3000/up 2>/dev/null) || puma="000"
+  local puma probe_rc=0
+  puma=$(_recovery_bounded docker exec "$container" curl -s -o /dev/null \
+    -w "%{http_code}" -m 10 http://localhost:3000/up 2>/dev/null) || probe_rc=$?
+
+  # 126/127 mean the probe binary is missing or not executable, not that the app
+  # is down. Both surface as an empty body like a dead Puma does, and acting on
+  # them restarts a perfectly healthy box every cooldown, forever.
+  if [ "$probe_rc" -eq 126 ] || [ "$probe_rc" -eq 127 ]; then
+    echo "[$(date)] recovery: WARN cannot probe $container (curl missing or not executable, exit $probe_rc); not treating this as an outage"
+    consecutive_failures=0
+    _recovery_write_state
+    return 0
+  fi
+  [ -z "$puma" ] && puma="000"
 
   if [ "$puma" = "200" ]; then
     consecutive_failures=0

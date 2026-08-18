@@ -16,6 +16,7 @@ REVIEW.md
 tests/fixtures/*
 !tests/fixtures/seed_data.sql
 !tests/fixtures/descriptor_flood.rb
+!tests/fixtures/recovery_guard_checks.sh
 tests/.tmp*
 tests/smoke/.smoke-test.env
 tests/smoke/.vagrant-smoke*
