@@ -24,6 +24,16 @@ RECOVERY_FAILURE_THRESHOLD=3
 RECOVERY_COOLDOWN_SECONDS=900
 RECOVERY_DEFAULT_COMMAND="systemctl restart broadcast"
 
+# Probes a freshly started container gets before recovery may act on it, on top
+# of the failure threshold. Counted in PROBES rather than seconds because cron
+# runs this once a minute, so the two are the same unit, and because tests can
+# then exercise the boundary without sleeping through it.
+#
+# A cold boot including the full migration suite measures around 9 seconds, so
+# ten probes is generous. It is meant to cover the slow cases -- a migration
+# rebuilding an index on a large table -- not the ordinary one.
+RECOVERY_BOOT_GRACE_PROBES=10
+
 # EXTENSION POINT — admin alerting.
 #
 # Today this writes a local line to /opt/broadcast/logs/recovery.log, which is
@@ -55,6 +65,8 @@ _recovery_write_state() {
   cat > "$state_file.tmp" <<STATE
 consecutive_failures=$consecutive_failures
 last_recovery_at=$last_recovery_at
+container_started_at=$container_started_at
+probes_since_start=$probes_since_start
 STATE
   mv "$state_file.tmp" "$state_file"
 }
@@ -72,15 +84,56 @@ function recover() {
   now=$(date +%s)
 
   local consecutive_failures=0 last_recovery_at=0
+  local container_started_at="" probes_since_start=0
   if [ -f "$state_file" ]; then
     # shellcheck disable=SC1090
     source "$state_file" || true
   fi
 
+  local container="${RECOVERY_CONTAINER:-app}"
+
+  # GUARD 1 -- is there a container to recover at all?
+  #
+  # `upgrade` runs: systemctl stop broadcast (compose down removes the
+  # containers) -> docker compose pull -> systemctl start broadcast. Between
+  # the stop and the start there is no app container, and the image pull sits in
+  # the middle, so that window is minutes. A probe fails there because there is
+  # nothing to probe, and restarting the service into a running upgrade fights
+  # the thing that removed the container in the first place.
+  #
+  # An absent or stopped container is a deploy, a stop, or an upgrade. Docker's
+  # own restart: always and the operator own that case; recovery stays out. The
+  # incident this exists for looked nothing like it: the container was Running
+  # the entire time.
+  local running
+  running=$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null) || running=""
+  if [ "$running" != "true" ]; then
+    consecutive_failures=0
+    probes_since_start=0
+    _recovery_write_state
+    return 0
+  fi
+
+  # GUARD 2 -- is this container old enough to judge?
+  #
+  # A container that just started is booting: migrations run before Puma
+  # listens, and to this probe that is indistinguishable from the outage. Track
+  # the instance by StartedAt; a change means a new container, so the count
+  # starts again. That also stops recovery restarting the container it just
+  # restarted.
+  local started_at
+  started_at=$(docker inspect -f '{{.State.StartedAt}}' "$container" 2>/dev/null) || started_at=""
+  if [ "$started_at" != "$container_started_at" ]; then
+    container_started_at="$started_at"
+    consecutive_failures=0
+    probes_since_start=0
+  fi
+  probes_since_start=$((probes_since_start + 1))
+
   # The probe that saw the outage. Not through Thruster: Thruster answers 502
   # perfectly happily while there is nothing behind it.
   local puma
-  puma=$(docker exec "${RECOVERY_CONTAINER:-app}" curl -s -o /dev/null \
+  puma=$(docker exec "$container" curl -s -o /dev/null \
     -w "%{http_code}" -m 10 http://localhost:3000/up 2>/dev/null) || puma="000"
 
   if [ "$puma" = "200" ]; then
@@ -95,6 +148,12 @@ function recover() {
   consecutive_failures=$((consecutive_failures + 1))
   if [ "$consecutive_failures" -lt "$RECOVERY_FAILURE_THRESHOLD" ]; then
     echo "[$(date)] recovery: Puma probe failed ($puma), $consecutive_failures/$RECOVERY_FAILURE_THRESHOLD before acting"
+    _recovery_write_state
+    return 0
+  fi
+
+  if [ "$probes_since_start" -lt "$RECOVERY_BOOT_GRACE_PROBES" ]; then
+    echo "[$(date)] recovery: Puma unreachable, but this container has only been up for $probes_since_start/$RECOVERY_BOOT_GRACE_PROBES probes; treating it as still booting"
     _recovery_write_state
     return 0
   fi

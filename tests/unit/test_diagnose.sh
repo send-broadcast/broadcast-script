@@ -738,6 +738,36 @@ test_diagnose_cron_section_tails_update_and_trigger_logs() {
     assert_contains "$cron" "upgrade triggered" "the trigger.log tail must be captured"
 }
 
+test_diagnose_reports_auto_recovery_activity() {
+    # A server that has been restarting itself is the single most important
+    # thing support can know before reading anything else, and the operator
+    # will not mention it because it happened without them. recover.sh writes
+    # logs/recovery.log; the bundle has to carry it.
+    mkdir -p "$SANDBOX_ROOT/logs"
+    echo "[Sat Aug 15 09:03:00 UTC 2026] RECOVERY: Puma unreachable on :3000 for 3 consecutive probes" \
+        > "$SANDBOX_ROOT/logs/recovery.log"
+
+    sandbox_run "diagnose" >/dev/null
+
+    local dir cron
+    dir=$(bundle_dir)
+    cron=$(cat "${dir}cron.txt")
+    assert_contains "$cron" "RECOVERY" \
+        "the bundle must show that auto-recovery has been restarting this server"
+}
+
+test_diagnose_notes_when_auto_recovery_is_disabled() {
+    touch "$SANDBOX_ROOT/.no_auto_recovery"
+
+    sandbox_run "diagnose" >/dev/null
+
+    local dir cron
+    dir=$(bundle_dir)
+    cron=$(cat "${dir}cron.txt")
+    assert_contains "$cron" "auto-recovery is DISABLED" \
+        "support must be told the server will not restart itself, or they will wait for a recovery that never comes"
+}
+
 test_diagnose_captures_local_customizations() {
     harness_mock git 'case "$*" in
   *"status --porcelain"*) echo " M docker-compose.yml" ;;
@@ -889,6 +919,8 @@ run_diagnose_tests() {
     run_test "test_diagnose_records_timeline" test_diagnose_records_timeline
     run_test "test_diagnose_cron_liveness_keys_off_monitor_heartbeat" test_diagnose_cron_liveness_keys_off_monitor_heartbeat
     run_test "test_diagnose_cron_section_tails_update_and_trigger_logs" test_diagnose_cron_section_tails_update_and_trigger_logs
+    run_test "test_diagnose_reports_auto_recovery_activity" test_diagnose_reports_auto_recovery_activity
+    run_test "test_diagnose_notes_when_auto_recovery_is_disabled" test_diagnose_notes_when_auto_recovery_is_disabled
     run_test "test_diagnose_captures_local_customizations" test_diagnose_captures_local_customizations
     run_test "test_diagnose_filters_job_and_postgres_errors" test_diagnose_filters_job_and_postgres_errors
     run_test "test_diagnose_checks_outbound_network" test_diagnose_checks_outbound_network

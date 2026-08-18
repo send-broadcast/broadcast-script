@@ -37,8 +37,21 @@ setup_sandbox() {
     echo "test-license-key" > "$SANDBOX_ROOT/.license"
 
     # docker: the Puma probe's status code is controlled by RECOVERY_PUMA_CODE
+    # docker mock:
+    #   inspect .State.Running    -> RECOVERY_CONTAINER_RUNNING (default true)
+    #   inspect .State.StartedAt  -> RECOVERY_STARTED_AT (default a fixed instant)
+    #   an absent container is RECOVERY_CONTAINER_RUNNING=absent: no output, exit 1
+    #   exec ... curl             -> RECOVERY_PUMA_CODE (default 200)
     harness_mock docker 'case "$*" in
-  exec\ app\ curl*)
+  *inspect*State.Running*)
+    if [ "${RECOVERY_CONTAINER_RUNNING:-true}" = "absent" ]; then exit 1; fi
+    printf "%s" "${RECOVERY_CONTAINER_RUNNING:-true}"
+    ;;
+  *inspect*State.StartedAt*)
+    if [ "${RECOVERY_CONTAINER_RUNNING:-true}" = "absent" ]; then exit 1; fi
+    printf "%s" "${RECOVERY_STARTED_AT:-2026-08-01T00:00:00Z}"
+    ;;
+  exec\ *curl*)
     printf "%s" "${RECOVERY_PUMA_CODE:-200}"
     if [ "${RECOVERY_PUMA_CODE:-200}" = "000" ]; then exit 7; fi
     ;;
@@ -54,8 +67,16 @@ teardown_sandbox() {
 run_probes() {
     local code="$1" times="$2" i
     for ((i = 1; i <= times; i++)); do
-        sandbox_run "recover" "export RECOVERY_PUMA_CODE=$code" >/dev/null
+        sandbox_run "recover" \
+            "export RECOVERY_PUMA_CODE=$code; export RECOVERY_CONTAINER_RUNNING='${CONTAINER_RUNNING:-true}'; export RECOVERY_STARTED_AT='${STARTED_AT:-2026-08-01T00:00:00Z}'" >/dev/null
     done
+}
+
+# A container we have been watching for a while: past its boot grace, so the
+# ordinary three-failure threshold governs. Most tests want this, because the
+# failure they model is a server that has been up for days and then breaks.
+settle_container() {
+    run_probes 200 12
 }
 
 restarts_logged() {
@@ -79,12 +100,14 @@ test_two_consecutive_failures_do_not_restart() {
 }
 
 test_third_consecutive_failure_restarts_the_service() {
+    settle_container
     run_probes 000 3
     assert_equals "1" "$(restarts_logged)" \
         "three consecutive failed Puma probes is the 2026-08-15 signature and must trigger recovery"
 }
 
 test_a_success_resets_the_failure_count() {
+    settle_container
     run_probes 000 2
     run_probes 200 1
     run_probes 000 2
@@ -95,6 +118,7 @@ test_a_success_resets_the_failure_count() {
 # --- flap guard ------------------------------------------------------------
 
 test_no_second_restart_within_the_cooldown() {
+    settle_container
     run_probes 000 3
     run_probes 000 3
     assert_equals "1" "$(restarts_logged)" \
@@ -102,6 +126,7 @@ test_no_second_restart_within_the_cooldown() {
 }
 
 test_restarts_again_after_the_cooldown_expires() {
+    settle_container
     run_probes 000 3
     # Age the recovery stamp past the cooldown window
     sandbox_run 'sed -i.bak "s/^last_recovery_at=.*/last_recovery_at=1/" "$BROADCAST_ROOT/.recovery_state"' >/dev/null
@@ -114,6 +139,7 @@ test_restarts_again_after_the_cooldown_expires() {
 
 test_recovery_runs_even_when_health_reporting_is_disabled() {
     touch "$SANDBOX_ROOT/.no_health_reports"
+    settle_container
     run_probes 000 3
     assert_equals "1" "$(restarts_logged)" \
         "recovery is local and phones nobody, so opting out of monitoring must not opt out of coming back up"
@@ -131,6 +157,7 @@ test_kill_switch_disables_auto_recovery() {
 # --- admin notification seam ----------------------------------------------
 
 test_recovery_notifies_admins_through_the_extension_point() {
+    settle_container
     run_probes 000 3
     assert_file_exists "$SANDBOX_ROOT/logs/recovery.log" \
         "every recovery must leave an operator-visible record"
@@ -155,8 +182,8 @@ assert_not_contains_recovery() {
 # --- overridable action ----------------------------------------------------
 
 test_recovery_command_is_overridable() {
-    sandbox_run "recover" "export RECOVERY_PUMA_CODE=000" >/dev/null
-    sandbox_run "recover" "export RECOVERY_PUMA_CODE=000" >/dev/null
+    settle_container
+    run_probes 000 2
     sandbox_run "recover" "export RECOVERY_PUMA_CODE=000; export RECOVERY_COMMAND='docker restart app'" >/dev/null
 
     harness_assert_called "docker restart app" \
@@ -169,6 +196,70 @@ test_probe_target_container_is_overridable() {
     sandbox_run "recover" "export RECOVERY_PUMA_CODE=200; export RECOVERY_CONTAINER='other-app'" >/dev/null
     harness_assert_called "exec other-app curl" \
         "the probed container must be overridable so integration tests can point at a disposable container"
+}
+
+# --- container-state guard -------------------------------------------------
+#
+# `upgrade` runs: systemctl stop broadcast (compose down removes the
+# containers) -> docker compose pull -> systemctl start broadcast. Between the
+# stop and the start there is NO app container, and the image pull sits in the
+# middle of it, so that window is minutes rather than seconds. A probe cannot
+# reach Puma because there is nothing to reach, which is indistinguishable from
+# the outage unless recovery looks at the container itself.
+
+test_does_not_act_when_the_container_is_absent() {
+    settle_container
+    CONTAINER_RUNNING=absent run_probes 000 6
+    assert_equals "0" "$(restarts_logged)" \
+        "an absent container is an upgrade or a stop, not an outage -- restarting the service here fights the upgrade that removed it"
+}
+
+test_does_not_act_when_the_container_is_not_running() {
+    settle_container
+    CONTAINER_RUNNING=false run_probes 000 6
+    assert_equals "0" "$(restarts_logged)" \
+        "a stopped container is Docker's business; restart: always owns that case"
+}
+
+test_still_acts_when_the_container_is_running() {
+    settle_container
+    run_probes 000 3
+    assert_equals "1" "$(restarts_logged)" \
+        "the guard must not swallow the case it exists for: container Running, Puma dead"
+}
+
+# --- boot grace ------------------------------------------------------------
+#
+# A freshly started container is booting, not broken. Migrations run before Puma
+# listens, and to a probe that only asks "is Puma answering" the two look the
+# same. Measured in probes rather than seconds so it is the same unit the cron
+# cadence uses (one probe per minute) and tests can exercise it without sleeping.
+
+test_does_not_act_within_the_boot_grace_of_a_new_container() {
+    settle_container
+    # A new container instance: same name, new StartedAt.
+    STARTED_AT=2026-08-02T00:00:00Z run_probes 000 5
+    assert_equals "0" "$(restarts_logged)" \
+        "five failed probes against a just-started container is a slow boot, not an outage"
+}
+
+test_acts_once_the_boot_grace_has_passed() {
+    settle_container
+    STARTED_AT=2026-08-02T00:00:00Z run_probes 000 12
+    assert_equals "1" "$(restarts_logged)" \
+        "the grace must expire; a container that is still dead long after starting is genuinely broken"
+}
+
+test_a_restarted_container_gets_a_fresh_boot_grace() {
+    settle_container
+    run_probes 000 3
+    assert_equals "1" "$(restarts_logged)" "precondition: the first recovery fired"
+
+    # The restart produces a new container instance. Its boot must be protected
+    # again -- otherwise recovery restarts the thing it just restarted.
+    STARTED_AT=2026-08-03T00:00:00Z run_probes 000 5
+    assert_equals "1" "$(restarts_logged)" \
+        "the container recovery just restarted must get its own boot grace"
 }
 
 #######################
@@ -195,6 +286,12 @@ run_recovery_tests() {
     run_test "test_no_notification_when_nothing_was_recovered" test_no_notification_when_nothing_was_recovered
     run_test "test_recovery_command_is_overridable" test_recovery_command_is_overridable
     run_test "test_probe_target_container_is_overridable" test_probe_target_container_is_overridable
+    run_test "test_does_not_act_when_the_container_is_absent" test_does_not_act_when_the_container_is_absent
+    run_test "test_does_not_act_when_the_container_is_not_running" test_does_not_act_when_the_container_is_not_running
+    run_test "test_still_acts_when_the_container_is_running" test_still_acts_when_the_container_is_running
+    run_test "test_does_not_act_within_the_boot_grace_of_a_new_container" test_does_not_act_within_the_boot_grace_of_a_new_container
+    run_test "test_acts_once_the_boot_grace_has_passed" test_acts_once_the_boot_grace_has_passed
+    run_test "test_a_restarted_container_gets_a_fresh_boot_grace" test_a_restarted_container_gets_a_fresh_boot_grace
 
     local result
     print_test_summary

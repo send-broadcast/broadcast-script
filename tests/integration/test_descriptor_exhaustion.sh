@@ -148,6 +148,22 @@ start_app_with_nofile() {
         "curl -sf -o /dev/null -m 5 http://127.0.0.1:${HOST_PORT}/up" 90 3 || return 1
 }
 
+# Starts the app and returns IMMEDIATELY, without waiting for it to serve. The
+# window between "container Running" and "Puma listening" is where an upgrade
+# runs its migrations, and it is the window recovery must not act in.
+start_app_booting() {
+    docker rm -f "$APP" >/dev/null 2>&1 || true
+    docker run -d --name "$APP" --network "$NET" \
+        --ulimit "nofile=${TREATMENT_NOFILE}:${TREATMENT_NOFILE}" \
+        -p "${HOST_PORT}:80" \
+        -e RAILS_ENV=production \
+        -e SECRET_KEY_BASE=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+        -e DATABASE_HOST="$PG" \
+        -e DATABASE_USERNAME=broadcast \
+        -e DATABASE_PASSWORD=fdtestpw \
+        "$APP_IMAGE" >/dev/null
+}
+
 # Runs the flood from a sibling container so the suite needs no Ruby on the
 # host. Its own nofile must be generous or the flooder hits the ceiling first
 # and never applies pressure to the app.
@@ -312,14 +328,17 @@ test_auto_recovery_restores_the_broken_stack() {
         fail_test "the container exited or restarted; then Docker would have recovered it and recovery would be unnecessary"
     fi
 
-    # Two ticks must NOT act: hysteresis is what stops an ordinary deploy blip
-    # from becoming a self-inflicted restart.
-    run_recover_tick
-    run_recover_tick
+    # Ticks inside the boot grace must NOT act. The container was started moments
+    # ago by this test, so recovery must treat it as still booting no matter how
+    # many failures it sees.
+    local i
+    for ((i = 1; i <= 9; i++)); do
+        run_recover_tick
+    done
     if grep -q "RECOVERY" "$RECOVER_SANDBOX/logs/recovery.log" 2>/dev/null; then
-        fail_test "recovery acted after two failed probes; hysteresis requires three"
+        fail_test "recovery acted while the container was still inside its boot grace"
     else
-        log_pass "two failed probes did not trigger a restart (hysteresis)"
+        log_pass "nine failed probes inside the boot grace did not trigger a restart"
     fi
 
     # Nothing has healed on its own, so what happens next is attributable.
@@ -328,11 +347,11 @@ test_auto_recovery_restores_the_broken_stack() {
         return 0
     fi
 
-    # The third tick is the one that acts.
+    # Past the grace, the same failure is judged genuine.
     run_recover_tick
 
     if grep -q "RECOVERY" "$RECOVER_SANDBOX/logs/recovery.log" 2>/dev/null; then
-        log_pass "third failed probe triggered recovery and recorded it for admins"
+        log_pass "the probe past the boot grace triggered recovery and recorded it for admins"
     else
         fail_test "recovery never fired: $(tail -3 "$RECOVER_SANDBOX/recover-output.log" 2>/dev/null)"
     fi
@@ -342,6 +361,79 @@ test_auto_recovery_restores_the_broken_stack() {
         log_pass "site is serving again, restored with no human involved (the 31 minutes, closed)"
     else
         fail_test "the stack never came back after recovery restarted it"
+    fi
+
+    rm -rf "$RECOVER_SANDBOX"
+}
+
+# A booting container is NOT a broken one. `upgrade` stops the service, and the
+# app container then runs database migrations before Puma starts listening. To a
+# probe that only asks "is Puma answering", that is indistinguishable from the
+# outage -- so naive recovery restarts the stack mid-migration, turning a
+# recovery feature into an upgrade hazard.
+#
+# The container is Running throughout, so a Running check does not separate the
+# two cases. Only the container's age does.
+test_does_not_restart_a_container_that_is_still_booting() {
+    prepare_recover_script
+    start_app_with_nofile "$TREATMENT_NOFILE"
+
+    # Make the container young the way an upgrade does, then make Puma
+    # unreachable the way an unfinished migration does. Waiting for the real
+    # boot window is not reliable -- once migrations are already applied the app
+    # comes up in under five seconds -- so freeze Puma to hold the state open.
+    # From the probe's side this is byte-identical to a slow migration: young
+    # container, Running, Puma not answering.
+    docker restart "$APP" >/dev/null 2>&1 || true
+    sleep 6
+    docker exec "$APP" pkill -STOP -x ruby >/dev/null 2>&1 || true
+    sleep 2
+
+    if serves_through_thruster; then
+        fail_test "Puma is still answering; there is no boot window to protect here"
+        return 0
+    fi
+    log_pass "container is young and Running, Puma not answering (the migration window)"
+
+    # Every tick inside the grace must decline to act, including well past the
+    # three-failure threshold that governs a long-running container.
+    local i
+    for ((i = 1; i <= 5; i++)); do
+        run_recover_tick
+    done
+
+    if grep -q "RECOVERY" "$RECOVER_SANDBOX/logs/recovery.log" 2>/dev/null; then
+        fail_test "recovery restarted a freshly started container -- on a real upgrade this interrupts migrations mid-flight"
+    else
+        log_pass "left the freshly started container alone"
+    fi
+
+    rm -rf "$RECOVER_SANDBOX"
+}
+
+# The upgrade window, end to end. `upgrade` stops the service (compose down
+# removes the containers) and then pulls a new image, which takes minutes. If
+# recovery acts here it runs `systemctl restart broadcast` into a running
+# upgrade.
+test_does_not_act_while_the_container_is_absent() {
+    prepare_recover_script
+    docker rm -f "$APP" >/dev/null 2>&1 || true
+
+    if docker inspect -f '{{.State.Running}}' "$APP" >/dev/null 2>&1; then
+        fail_test "the container is still present; this test needs it gone"
+        return 0
+    fi
+    log_pass "no app container at all (the compose down + image pull window)"
+
+    local i
+    for ((i = 1; i <= 6; i++)); do
+        run_recover_tick
+    done
+
+    if grep -q "RECOVERY" "$RECOVER_SANDBOX/logs/recovery.log" 2>/dev/null; then
+        fail_test "recovery fired with no container present -- this restarts the service into a running upgrade"
+    else
+        log_pass "left the absent container alone (upgrade owns that window)"
     fi
 
     rm -rf "$RECOVER_SANDBOX"
@@ -378,6 +470,8 @@ run_descriptor_exhaustion_tests() {
     run_test "test_control_low_limit_exhausts_and_still_reports_healthy" test_control_low_limit_exhausts_and_still_reports_healthy
     run_test "test_treatment_high_limit_survives_the_same_flood" test_treatment_high_limit_survives_the_same_flood
     run_test "test_auto_recovery_restores_the_broken_stack" test_auto_recovery_restores_the_broken_stack
+    run_test "test_does_not_restart_a_container_that_is_still_booting" test_does_not_restart_a_container_that_is_still_booting
+    run_test "test_does_not_act_while_the_container_is_absent" test_does_not_act_while_the_container_is_absent
 
     local result
     print_test_summary

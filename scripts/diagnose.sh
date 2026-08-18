@@ -416,6 +416,22 @@ function diagnose() {
     echo "--- trigger.log tail (dashboard-triggered operations) ---"
     tail -20 /opt/broadcast/logs/cron/trigger.log 2>/dev/null || echo "(no trigger.log)"
     echo
+    # A server that has been restarting itself is the first thing support needs
+    # to know, and the operator will not mention it because it happened without
+    # them. Written by recover.sh; see _recovery_notify_admin.
+    echo "--- auto-recovery ---"
+    if [ -f /opt/broadcast/.no_auto_recovery ]; then
+      echo "WARN: auto-recovery is DISABLED (/opt/broadcast/.no_auto_recovery present) — this server will not restart itself when Puma stops answering"
+    else
+      echo "ok: auto-recovery is enabled"
+    fi
+    if [ -s /opt/broadcast/logs/recovery.log ]; then
+      echo "recoveries recorded: $(grep -c 'RECOVERY' /opt/broadcast/logs/recovery.log 2>/dev/null || echo unknown)"
+      tail -10 /opt/broadcast/logs/recovery.log 2>/dev/null || true
+    else
+      echo "no recoveries recorded"
+    fi
+    echo
     # A deferred upgrade is correct behaviour once, but a server that is busy
     # around the clock would stop upgrading and never say so.
     if [ -f /opt/broadcast/.upgrade_deferred ]; then
