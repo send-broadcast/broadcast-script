@@ -134,6 +134,19 @@ test_restore_allows_older_backup_version() {
     assert_file_exists "$APPLY_MARKER" "restore_apply should run for an older backup"
 }
 
+# Installs pinned to a rolling tag record it in .current_version ("latest" on
+# fresh installs, "edge" on dev servers). compare_versions on a non-numeric
+# string is a bash arithmetic error, so the gate must skip instead of crash.
+test_restore_skips_version_gate_on_rolling_tag() {
+    local archive result=0
+    archive=$(make_backup_archive "$RESTORE_TEST_ROOT" "1.0.0")
+    echo "edge" > "$RESTORE_TEST_ROOT/.current_version"
+
+    restore "$(basename "$archive")" --yes </dev/null >/dev/null 2>&1 || result=$?
+    assert_equals "0" "$result" "restore on an edge-pinned install should proceed"
+    assert_file_exists "$APPLY_MARKER" "restore_apply should run when installed version is a rolling tag"
+}
+
 test_restore_fails_when_archive_has_no_dump() {
     local work archive result=0
     work=$(mktemp -d)
@@ -238,6 +251,7 @@ run_restore_function_tests() {
     run_test "test_restore_runs_with_assume_yes_env" test_restore_runs_with_assume_yes_env
     run_test "test_restore_rejects_newer_backup_version" test_restore_rejects_newer_backup_version
     run_test "test_restore_allows_older_backup_version" test_restore_allows_older_backup_version
+    run_test "test_restore_skips_version_gate_on_rolling_tag" test_restore_skips_version_gate_on_rolling_tag
     run_test "test_restore_fails_when_archive_has_no_dump" test_restore_fails_when_archive_has_no_dump
     run_test "test_restore_verifies_a_matching_checksum_sidecar" test_restore_verifies_a_matching_checksum_sidecar
     run_test "test_restore_rejects_a_corrupted_backup" test_restore_rejects_a_corrupted_backup

@@ -11,6 +11,12 @@ release cadence begins, dated version sections will be promoted from this list.
 ## [Unreleased]
 
 ### Added
+- **`upgrade edge` for main-branch builds.** The broadcast repo now publishes an `edge` image tag tracking the tip of `main` (plus immutable `edge-<sha>` tags for pinning). `./broadcast.sh upgrade edge` already worked mechanically; it now guards itself: interactively you must type `edge` to confirm you understand it's an unreleased build whose migrations may make a downgrade unsafe, and automated (cron-driven) upgrades refuse the tag outright so a production box can never drift onto it. Dev/throwaway servers only.
+
+### Fixed
+- **Restore no longer crashes on installs pinned to a rolling tag.** The restore version gate fed `.current_version` straight into a semver comparison; on a box pinned to `latest` (every fresh install) or `edge`, that was a bash arithmetic error (`10#edge`) that killed the restore under `set -e` before it copied anything. Non-numeric versions now skip the gate with a warning instead.
+
+### Added
 - **Auto-recovery now reaches existing installs, and is harder to misfire.** `upgrade` installs the recover cron alongside the health one, so an existing install no longer has to run the manual `fix` command to get it — the customer whose outage motivated the feature would otherwise have upgraded and still had nothing restarting their server. `recover` also now takes a lock (overlapping cron ticks could each bank the same failure count and both restart), bounds every Docker call with a timeout (a wedged `dockerd` otherwise hung a tick forever while cron started another every minute), and treats a missing probe binary as a broken probe rather than a broken app — that was the one path where it would have restarted a perfectly healthy server every 15 minutes, forever.
 - **File-descriptor usage is now recorded.** `monitor` writes the app container's open-descriptor count and its limit to `system.json` every minute, and `diagnose` reports both for the app and job containers, warning past 70% of the ceiling. The 2026-08-15 outage was descriptor exhaustion and nothing on the box was counting, so we could not tell a burst that exhausted a low limit from a slow leak that had been climbing for days. The webhook burst that triggered it arrives daily, so a per-burst leak now shows as a step change within a day or two instead of being invisible until the next outage.
 

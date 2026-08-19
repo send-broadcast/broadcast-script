@@ -57,6 +57,25 @@ function upgrade() {
     shift
   done
 
+  # "edge" is the unreleased main-branch build (dev/throwaway servers only).
+  # It can carry database migrations that are in no release, and migrations
+  # do not roll back — a server that has run edge cannot safely downgrade to
+  # a release against the same database. Confirm interactively; refuse in
+  # automated runs (cron must never drift a production box onto edge).
+  if [ "$target_version" = "edge" ] && [ -z "$force" ]; then
+    if [ -n "$automated" ]; then
+      echo -e "\e[31mRefusing automated upgrade to 'edge' (unreleased build). Run it interactively or with --force.\e[0m"
+      return 1
+    fi
+    echo -e "\e[33mWARNING: 'edge' is an UNRELEASED build of the main branch, intended for dev servers only.\e[0m"
+    echo -e "\e[33mIt may include database migrations that no release has, making a later downgrade unsafe.\e[0m"
+    read -r -p "Type 'edge' to confirm: " confirmation
+    if [ "$confirmation" != "edge" ]; then
+      echo "Upgrade cancelled."
+      return 1
+    fi
+  fi
+
   # Preflight BEFORE anything destructive. Stopping the service is the point
   # of no return for work a restart cannot resume — a job mid-batch is killed,
   # not requeued. An automated run defers instead of failing: a nonzero exit

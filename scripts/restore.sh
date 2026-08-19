@@ -119,6 +119,23 @@ function restore_prepare() {
   echo -e "\e[34mBackup version: $backup_version\e[0m"
   echo -e "\e[34mInstalled version: $installed_version\e[0m"
 
+  # The gate can only reason about numeric versions. Installs pinned to a
+  # rolling tag ("latest" on fresh installs, "edge"/"edge-<sha>" on dev
+  # servers) record that tag in .current_version; feeding it to
+  # compare_versions is a bash arithmetic error ("10#edge"), which under
+  # `set -e` kills the restore outright. Treat non-numeric as unknown and
+  # let the restore proceed with a warning instead.
+  local numeric='^[0-9]+(\.[0-9]+)*$'
+  if ! [[ "$backup_version" =~ $numeric ]]; then
+    backup_version="unknown"
+  fi
+  if ! [[ "$installed_version" =~ $numeric ]]; then
+    if [ "$installed_version" != "unknown" ]; then
+      echo -e "\e[33mInstalled version '$installed_version' is not a release version (rolling tag); skipping the version compatibility check.\e[0m"
+    fi
+    installed_version="unknown"
+  fi
+
   # Check for version incompatibility
   if [ "$backup_version" != "unknown" ] && [ "$installed_version" != "unknown" ]; then
     compare_versions "$backup_version" "$installed_version"
