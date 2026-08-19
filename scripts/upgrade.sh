@@ -64,15 +64,24 @@ function upgrade() {
   # automated runs (cron must never drift a production box onto edge).
   if [ "$target_version" = "edge" ] && [ -z "$force" ]; then
     if [ -n "$automated" ]; then
-      echo -e "\e[31mRefusing automated upgrade to 'edge' (unreleased build). Run it interactively or with --force.\e[0m"
-      return 1
-    fi
-    echo -e "\e[33mWARNING: 'edge' is an UNRELEASED build of the main branch, intended for dev servers only.\e[0m"
-    echo -e "\e[33mIt may include database migrations that no release has, making a later downgrade unsafe.\e[0m"
-    read -r -p "Type 'edge' to confirm: " confirmation
-    if [ "$confirmation" != "edge" ]; then
-      echo "Upgrade cancelled."
-      return 1
+      # The dashboard's "Switch to edge build" arrives through this path
+      # (trigger.sh runs upgrades --automated). The marker is the host-side
+      # opt-in, created deliberately via `broadcast.sh edge-enable`; without
+      # it, refusal — cron must never drift a box onto main.
+      if [ -f "/opt/broadcast/.edge_enabled" ]; then
+        echo -e "\e[33mAutomated edge upgrade allowed: this host is opted in (.edge_enabled).\e[0m"
+      else
+        echo -e "\e[31mRefusing automated upgrade to 'edge' (unreleased build). Opt this host in first with: broadcast.sh edge-enable\e[0m"
+        return 1
+      fi
+    else
+      echo -e "\e[33mWARNING: 'edge' is an UNRELEASED build of the main branch, intended for dev servers only.\e[0m"
+      echo -e "\e[33mIt may include database migrations that no release has, making a later downgrade unsafe.\e[0m"
+      read -r -p "Type 'edge' to confirm: " confirmation
+      if [ "$confirmation" != "edge" ]; then
+        echo "Upgrade cancelled."
+        return 1
+      fi
     fi
   fi
 

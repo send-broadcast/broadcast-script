@@ -22,8 +22,12 @@ function trigger() {
     # Read the content of the upgrade.txt file
     trigger_content=$(cat "/opt/broadcast/app/triggers/upgrade.txt" 2>/dev/null || echo "")
     
-    # Validate if content looks like a version number (semantic versioning: x.y.z)
-    if echo "$trigger_content" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.-]+)?(\+[a-zA-Z0-9\.-]+)?$'; then
+    # Validate the content: a semantic version, or the literal 'edge' (the
+    # unreleased main-branch build the dashboard's developer card requests —
+    # it must NOT hit the fallback below, which would silently install the
+    # latest release instead; upgrade.sh itself still refuses edge unless
+    # this host opted in via .edge_enabled)
+    if [ "$trigger_content" = "edge" ] || echo "$trigger_content" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9\.-]+)?(\+[a-zA-Z0-9\.-]+)?$'; then
       target_version="$trigger_content"
       echo "[$(date)] upgrade triggered with target version: $target_version"
       

@@ -61,6 +61,9 @@ function display_help() {
   echo "  fix                      Repair installation drift (dirs, permissions, services, cron, keys)"
   echo "  health                   Report server health to the Broadcast dashboard (runs via cron)"
   echo "  recover                  Restart the stack if Puma has stopped answering (runs via cron)"
+  echo "  edge-enable              Allow dashboard-triggered upgrades to the unreleased"
+  echo "                          'edge' build on this host (dev servers only)"
+  echo "  edge-disable             Refuse automated 'edge' upgrades again (default)"
   echo "  monitor-enable           Enable health reporting on this server and check in now"
   echo "  monitor-disable          Stop all health reporting from this server (zero phone-home)"
   echo "  trigger                  Automated check on triggers from Broadcast to the host"
@@ -190,6 +193,18 @@ main() {
       ;;
     recover)
       recover
+      ;;
+    edge-enable)
+      # Host-side opt-in for the developer 'edge' channel: with the marker in
+      # place, dashboard-triggered (automated) upgrades may install the
+      # unreleased main-branch build. Dev/throwaway servers only.
+      touch /opt/broadcast/.edge_enabled
+      echo "Edge channel enabled: this host will accept dashboard-triggered upgrades to the unreleased 'edge' build."
+      echo "Dev/throwaway servers only — edge migrations can make returning to a release unsafe."
+      ;;
+    edge-disable)
+      rm -f /opt/broadcast/.edge_enabled
+      echo "Edge channel disabled: automated upgrades to 'edge' will be refused again."
       ;;
     monitor-enable)
       monitor_enable

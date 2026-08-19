@@ -43,6 +43,27 @@ test_upgrade_forwards_target_version_through_reexec() {
         "the re-exec must carry the requested version"
 }
 
+# --- edge channel guard ---------------------------------------------------
+
+# The dashboard triggers upgrades through the --automated path; edge (the
+# unreleased main-branch build) must only pass it on hosts that opted in by
+# creating the .edge_enabled marker. Everywhere else, refusal — cron must
+# never drift a production box onto main.
+test_upgrade_automated_edge_refused_without_marker() {
+    local rc=0
+    sandbox_run "upgrade --automated edge" >/dev/null 2>&1 || rc=$?
+    assert_equals "1" "$rc" "automated edge upgrade must be refused without the opt-in marker"
+    harness_assert_not_called "broadcast.sh _upgrade_continue edge" \
+        "the re-exec must not run for a refused edge upgrade"
+}
+
+test_upgrade_automated_edge_allowed_with_marker() {
+    touch "$SANDBOX_ROOT/.edge_enabled"
+    sandbox_run "upgrade --automated edge" >/dev/null
+    harness_assert_called "broadcast.sh _upgrade_continue edge" \
+        "an opted-in host must run the automated edge upgrade"
+}
+
 # --- trigger.sh -----------------------------------------------------------
 
 test_trigger_upgrade_with_valid_version() {
@@ -55,6 +76,20 @@ test_trigger_upgrade_with_valid_version() {
     # not treat a busy server as a broken one.
     harness_assert_called "broadcast.sh upgrade --automated 1.2.3" \
         "should upgrade to the requested version via the automated path"
+    assert_file_not_exists "$SANDBOX_ROOT/app/triggers/upgrade.txt" \
+        "trigger file must be consumed"
+}
+
+# "edge" fails the semver check, and the fallback for unrecognized content is
+# a plain latest-release upgrade — the literal allowlist keeps a UI-triggered
+# edge switch from silently installing the latest release instead.
+test_trigger_upgrade_with_edge_content() {
+    echo "edge" > "$SANDBOX_ROOT/app/triggers/upgrade.txt"
+
+    sandbox_run "trigger" >/dev/null
+
+    harness_assert_called "broadcast.sh upgrade --automated edge" \
+        "an edge trigger must request the edge tag, not fall back to latest"
     assert_file_not_exists "$SANDBOX_ROOT/app/triggers/upgrade.txt" \
         "trigger file must be consumed"
 }
@@ -236,7 +271,10 @@ run_workflow_tests() {
 
     run_test "test_upgrade_updates_stops_then_reexecs" test_upgrade_updates_stops_then_reexecs
     run_test "test_upgrade_forwards_target_version_through_reexec" test_upgrade_forwards_target_version_through_reexec
+    run_test "test_upgrade_automated_edge_refused_without_marker" test_upgrade_automated_edge_refused_without_marker
+    run_test "test_upgrade_automated_edge_allowed_with_marker" test_upgrade_automated_edge_allowed_with_marker
     run_test "test_trigger_upgrade_with_valid_version" test_trigger_upgrade_with_valid_version
+    run_test "test_trigger_upgrade_with_edge_content" test_trigger_upgrade_with_edge_content
     run_test "test_trigger_upgrade_falls_back_on_invalid_version" test_trigger_upgrade_falls_back_on_invalid_version
     run_test "test_trigger_domains_updates_tls_and_restarts" test_trigger_domains_updates_tls_and_restarts
     run_test "test_trigger_backup_db" test_trigger_backup_db
