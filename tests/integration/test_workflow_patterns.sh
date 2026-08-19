@@ -64,6 +64,44 @@ test_upgrade_automated_edge_allowed_with_marker() {
         "an opted-in host must run the automated edge upgrade"
 }
 
+# edge_enable is the single switch for the whole opt-in: it sets BOTH gates
+# (the host marker and the app env flag) and restarts the app so the env
+# change actually applies, instead of leaving a silently-pending config.
+test_edge_enable_sets_both_gates_and_restarts() {
+    sandbox_run "edge_enable" >/dev/null
+
+    assert_file_exists "$SANDBOX_ROOT/.edge_enabled" "marker must be created"
+    assert_equals "1" "$(grep -c '^BROADCAST_EDGE_ENABLED=1$' "$SANDBOX_ROOT/app/.env")" \
+        "app/.env must carry the UI flag"
+    harness_assert_called "systemctl start broadcast" "app must restart so the env change applies"
+}
+
+test_edge_enable_is_idempotent() {
+    sandbox_run "edge_enable --no-restart && edge_enable --no-restart" >/dev/null
+
+    assert_equals "1" "$(grep -c '^BROADCAST_EDGE_ENABLED' "$SANDBOX_ROOT/app/.env")" \
+        "running twice must not duplicate the env line"
+}
+
+test_edge_enable_no_restart_skips_restart() {
+    sandbox_run "edge_enable --no-restart" >/dev/null
+
+    assert_file_exists "$SANDBOX_ROOT/.edge_enabled" "marker must still be created"
+    harness_assert_not_called "systemctl start broadcast" "--no-restart must not restart"
+}
+
+test_edge_disable_removes_both_gates() {
+    touch "$SANDBOX_ROOT/.edge_enabled"
+    echo "BROADCAST_EDGE_ENABLED=1" >> "$SANDBOX_ROOT/app/.env"
+
+    sandbox_run "edge_disable" >/dev/null
+
+    assert_file_not_exists "$SANDBOX_ROOT/.edge_enabled" "marker must be removed"
+    assert_equals "0" "$(grep -c '^BROADCAST_EDGE_ENABLED' "$SANDBOX_ROOT/app/.env" || true)" \
+        "env flag must be removed"
+    harness_assert_called "systemctl start broadcast" "app must restart so the env change applies"
+}
+
 # --- trigger.sh -----------------------------------------------------------
 
 test_trigger_upgrade_with_valid_version() {
@@ -273,6 +311,10 @@ run_workflow_tests() {
     run_test "test_upgrade_forwards_target_version_through_reexec" test_upgrade_forwards_target_version_through_reexec
     run_test "test_upgrade_automated_edge_refused_without_marker" test_upgrade_automated_edge_refused_without_marker
     run_test "test_upgrade_automated_edge_allowed_with_marker" test_upgrade_automated_edge_allowed_with_marker
+    run_test "test_edge_enable_sets_both_gates_and_restarts" test_edge_enable_sets_both_gates_and_restarts
+    run_test "test_edge_enable_is_idempotent" test_edge_enable_is_idempotent
+    run_test "test_edge_enable_no_restart_skips_restart" test_edge_enable_no_restart_skips_restart
+    run_test "test_edge_disable_removes_both_gates" test_edge_disable_removes_both_gates
     run_test "test_trigger_upgrade_with_valid_version" test_trigger_upgrade_with_valid_version
     run_test "test_trigger_upgrade_with_edge_content" test_trigger_upgrade_with_edge_content
     run_test "test_trigger_upgrade_falls_back_on_invalid_version" test_trigger_upgrade_falls_back_on_invalid_version

@@ -37,6 +37,68 @@ function includeDependencies() {
   source "${current_dir}/scripts/logs.sh"
 }
 
+# Single switch for the developer 'edge' channel. Enabling a host means TWO
+# gates (kept separate on purpose — the app checks the env flag, the upgrade
+# path checks the marker), but the decision is one, so one command sets both:
+#   * /opt/broadcast/.edge_enabled           — host accepts automated edge upgrades
+#   * BROADCAST_EDGE_ENABLED=1 in app/.env   — app shows the developer-builds card
+# The app only reads its env at boot, so both commands restart it by default;
+# --no-restart defers that (the env half stays pending until the next restart).
+# Strip any BROADCAST_EDGE_ENABLED line from an env file, in pure bash —
+# no grep/sed, so it behaves identically on GNU systems and dev machines
+# with shimmed tools.
+function _remove_edge_env_flag() {
+  local env_file="$1" tmp="${1}.tmp" line
+  : > "$tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      BROADCAST_EDGE_ENABLED=*) ;;
+      *) printf '%s\n' "$line" >> "$tmp" ;;
+    esac
+  done < "$env_file"
+  mv "$tmp" "$env_file"
+}
+
+function edge_enable() {
+  local no_restart=""
+  [ "${1:-}" = "--no-restart" ] && no_restart="yes"
+
+  touch /opt/broadcast/.edge_enabled
+
+  local env_file="/opt/broadcast/app/.env"
+  touch "$env_file"
+  _remove_edge_env_flag "$env_file"
+  echo "BROADCAST_EDGE_ENABLED=1" >> "$env_file"
+
+  echo "Edge channel enabled: this host accepts dashboard-triggered upgrades to the unreleased 'edge' build,"
+  echo "and the Broadcast UI will show the developer-builds card."
+  echo "Dev/throwaway servers only — edge migrations can make returning to a release unsafe."
+
+  if [ -n "$no_restart" ]; then
+    echo "Restart skipped (--no-restart): the UI card appears after the next app restart."
+  else
+    restart
+  fi
+}
+
+function edge_disable() {
+  local no_restart=""
+  [ "${1:-}" = "--no-restart" ] && no_restart="yes"
+
+  rm -f /opt/broadcast/.edge_enabled
+
+  local env_file="/opt/broadcast/app/.env"
+  [ -f "$env_file" ] && _remove_edge_env_flag "$env_file"
+
+  echo "Edge channel disabled: automated upgrades to 'edge' will be refused again and the UI card is hidden."
+
+  if [ -n "$no_restart" ]; then
+    echo "Restart skipped (--no-restart): the UI card disappears after the next app restart."
+  else
+    restart
+  fi
+}
+
 function display_help() {
   echo "Usage: $0 {install|update|upgrade|downgrade|restart|stop|start|backup|restore|help|monitor|trigger|change_installation_domain}"
   echo
@@ -61,9 +123,11 @@ function display_help() {
   echo "  fix                      Repair installation drift (dirs, permissions, services, cron, keys)"
   echo "  health                   Report server health to the Broadcast dashboard (runs via cron)"
   echo "  recover                  Restart the stack if Puma has stopped answering (runs via cron)"
-  echo "  edge-enable              Allow dashboard-triggered upgrades to the unreleased"
-  echo "                          'edge' build on this host (dev servers only)"
-  echo "  edge-disable             Refuse automated 'edge' upgrades again (default)"
+  echo "  edge-enable [--no-restart]  Opt this host into the edge channel: accept"
+  echo "                          dashboard-triggered 'edge' upgrades AND show the"
+  echo "                          developer-builds card (sets BROADCAST_EDGE_ENABLED=1"
+  echo "                          in app/.env, restarts the app). Dev servers only"
+  echo "  edge-disable [--no-restart]  Reverse both and refuse 'edge' again (default)"
   echo "  monitor-enable           Enable health reporting on this server and check in now"
   echo "  monitor-disable          Stop all health reporting from this server (zero phone-home)"
   echo "  trigger                  Automated check on triggers from Broadcast to the host"
@@ -195,16 +259,10 @@ main() {
       recover
       ;;
     edge-enable)
-      # Host-side opt-in for the developer 'edge' channel: with the marker in
-      # place, dashboard-triggered (automated) upgrades may install the
-      # unreleased main-branch build. Dev/throwaway servers only.
-      touch /opt/broadcast/.edge_enabled
-      echo "Edge channel enabled: this host will accept dashboard-triggered upgrades to the unreleased 'edge' build."
-      echo "Dev/throwaway servers only — edge migrations can make returning to a release unsafe."
+      edge_enable "${2:-}"
       ;;
     edge-disable)
-      rm -f /opt/broadcast/.edge_enabled
-      echo "Edge channel disabled: automated upgrades to 'edge' will be refused again."
+      edge_disable "${2:-}"
       ;;
     monitor-enable)
       monitor_enable
