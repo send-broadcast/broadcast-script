@@ -118,8 +118,45 @@ test_fix_repairs_ownership_drift() {
     harness_assert_called "chown -R broadcast:broadcast" "ownership drift must be repaired"
 }
 
+test_fix_makes_app_data_dirs_writable_by_the_container() {
+    # The app/job containers run as uid 1000 (image: USER 1000:1000) and
+    # WRITE these bind-mounted dirs. The broad `chown -R broadcast:broadcast`
+    # points them at the host broadcast user, whose uid is only 1000 by
+    # luck; when it is not (most cloud images already use uid 1000), the
+    # container cannot write them — the dashboard Upgrade button then writes
+    # no trigger file, uploads fail, and Thruster cannot persist its cert.
+    # fix must re-assert container-uid (1000) ownership on just those dirs.
+    local output
+    output=$(sandbox_run "fix" "$FIX_ENV")
+
+    harness_assert_called "chown -R 1000:1000" \
+        "app data dirs must be re-owned to the container uid so the container can write them"
+    assert_contains "$output" "container" \
+        "the container-writable repair/ok line must be reported"
+}
+
+test_fix_leaves_the_host_written_monitor_dir_alone() {
+    # app/monitor is written by the HOST (monitor.sh, as the broadcast user
+    # via su) and only READ by the container. Handing it to the container uid
+    # locks the writer out — host metrics then fail with "Permission denied"
+    # every minute while everything else looks healthy. Regression guard: the
+    # container-uid chown must never cover it.
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+
+    harness_assert_not_called "chown -R 1000:1000 /opt/broadcast/app/monitor" \
+        "app/monitor must stay writable by the host broadcast user"
+}
+
 test_fix_leaves_correct_ownership_alone() {
-    harness_mock stat 'echo broadcast'
+    # Format-aware, like the real stat: %U is the owner NAME, %u the numeric
+    # uid. fix checks the name for /opt/broadcast and the uid for the
+    # container-written dirs, so a mock that ignores the format reports
+    # phantom drift.
+    harness_mock stat 'case "${2:-}" in
+  %u) echo "${STAT_MOCK_UID:-1000}" ;;
+  *)  echo broadcast ;;
+esac
+exit 0'
 
     sandbox_run "fix" "$FIX_ENV" >/dev/null
 
@@ -488,7 +525,15 @@ test_fix_reports_clean_on_healthy_system() {
     # Healthy: correct ownership, units present AND current, cron populated,
     # keys exist. broadcast.service must match the template — an empty or
     # stale unit is drift that fix repairs.
-    harness_mock stat 'echo broadcast'
+    # Format-aware, like the real stat: %U is the owner NAME, %u the numeric
+    # uid. fix checks the name for /opt/broadcast and the uid for the
+    # container-written dirs, so a mock that ignores the format reports
+    # phantom drift.
+    harness_mock stat 'case "${2:-}" in
+  %u) echo "${STAT_MOCK_UID:-1000}" ;;
+  *)  echo broadcast ;;
+esac
+exit 0'
     sandbox_run "create_broadcast_service" >/dev/null
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-post-upgrade-cleanup.service"
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-logs-watcher.service"
@@ -524,6 +569,8 @@ run_fix_tests() {
     run_test "test_fix_recreates_missing_directories" test_fix_recreates_missing_directories
     run_test "test_fix_restores_broadcast_sh_executable_bit" test_fix_restores_broadcast_sh_executable_bit
     run_test "test_fix_repairs_ownership_drift" test_fix_repairs_ownership_drift
+    run_test "test_fix_makes_app_data_dirs_writable_by_the_container" test_fix_makes_app_data_dirs_writable_by_the_container
+    run_test "test_fix_leaves_the_host_written_monitor_dir_alone" test_fix_leaves_the_host_written_monitor_dir_alone
     run_test "test_fix_leaves_correct_ownership_alone" test_fix_leaves_correct_ownership_alone
     run_test "test_fix_recreates_missing_sudoers_entry" test_fix_recreates_missing_sudoers_entry
     run_test "test_fix_restores_docker_group_membership" test_fix_restores_docker_group_membership

@@ -1,5 +1,135 @@
 # TODO
 
+## Container-uid ownership of bind-mounted app dirs (2026-08-21, TDD)
+
+Customer report (Bilal Iftikhar, Firstborn Group, 2026-08-21): clicking
+"Upgrade to v2.31.1" in the dashboard does nothing. The UI shows "Upgrade in
+Progress" indefinitely and the app stays on the old version. Reproduced end
+to end on a real amd64 VM (Vagrant + QEMU/TCG, Ubuntu 24.04), driving the
+actual button in a browser rather than the CLI — the CLI path reports errors
+and would have masked it.
+
+### Root cause
+
+The app/job containers run as **uid 1000** (`USER 1000:1000`, fixed by the
+image's Dockerfile). `install.sh` creates the host user with
+`useradd -m -s /bin/bash broadcast` and **no uid pin**, then runs
+`chown -R broadcast:broadcast /opt/broadcast`. `useradd` takes the next free
+uid, so on hosts where uid 1000 is already occupied — most cloud images ship
+a default uid-1000 user (`ubuntu`, `admin`, `ec2-user`) — `broadcast` lands
+on 1001+. The bind-mounted dirs are mode 755 (owner-only write), so the
+container cannot write them at all:
+
+- `Installation#upgrade_now` fails with `Permission denied @ rb_sysopen -
+  /rails/triggers/upgrade.txt`, so no trigger file is ever created and the
+  host cron has nothing to act on — a silent no-op, repeatable forever
+- file/image uploads fail the same way (`app/storage`, `app/uploads`)
+- Thruster cannot persist its TLS certificate (`ssl`)
+
+Permissions are enforced on numeric uids, not names, so the container never
+sees a user called `broadcast` — only the number. The name always looked
+correct, which is why this stayed invisible.
+
+This sits UPSTREAM of every previously-known silent-upgrade path: the trigger
+file is never written, so `trigger.sh`'s unchecked exit code never even gets
+a chance to fire.
+
+### Fix (implemented)
+
+- [x] Test red first: `fix` must chown the container-written dirs to uid 1000
+      — tests/unit/test_fix.sh
+- [x] `scripts/common.sh`: `BROADCAST_CONTAINER_UID`/`GID` (default 1000),
+      `broadcast_container_writable_dirs()`, `chown_container_writable_dirs()`
+- [x] `scripts/fix.sh`: detect via `stat -c %u` (numeric uid, NOT `%U` — name
+      comparison is what hid the bug) and repair, reporting `ok:`/`fixed:`
+- [x] `scripts/install.sh`: re-assert after **both** broad chowns. The second
+      (line ~183) silently undid the first, so patching one alone would look
+      fixed while still shipping broken
+- [x] `scripts/upgrade.sh`: heal in `_upgrade_continue` after the pull and
+      before `systemctl start`, so existing servers self-repair
+- [x] `scripts/trigger.sh` + `change_installation_domain`: same, after their
+      broad chowns
+- [x] All 13 unit test files pass; repair + full browser-driven 2.31.0 ->
+      2.31.1 upgrade verified on the VM, ownership surviving the upgrade
+
+Ordering matters: `chown -R` is last-write-wins, so the helper must run AFTER
+any broad chown or it is silently undone.
+
+### `app/monitor` is deliberately excluded
+
+First version of the fix included `app/monitor` and that was a regression,
+caught on the live VM: it is the one bind mount where traffic runs the other
+way. The HOST writes it (`monitor.sh:57`, as the `broadcast` user via `su`)
+and the container only READS it (`Installation#gather_system_info`). Handing
+it to the container uid locked the writer out — host metrics failed with
+`Permission denied` every minute while everything else looked healthy.
+
+- [x] Removed from the list; regression test
+      `test_fix_leaves_the_host_written_monitor_dir_alone` guards it
+- [x] Verified: `system.json` fresh and owned by `broadcast`, `monitor.log`
+      clean, container still writes `triggers/` and reads `monitor/`
+
+Read access needs nothing beyond the mode 755 these dirs already carry.
+`diagnose.sh:424` already checks `system.json` freshness and would have
+caught this in a support bundle.
+
+### Customer-facing check
+
+One number, no root, no Docker:
+
+```bash
+stat -c %u /opt/broadcast/app/triggers
+```
+
+`1000` = healthy; anything else = affected. Preferred over `id -u broadcast`,
+which reads the same on healthy and broken boxes once the fix has run (it
+reports the host user's uid, not whether the app can actually write).
+
+Remediation on an affected server:
+
+```bash
+sudo /opt/broadcast/broadcast.sh update   # get the new scripts
+sudo /opt/broadcast/broadcast.sh fix      # repairs ownership
+```
+
+The dashboard button cannot bootstrap out of this on its own — writing the
+trigger file is precisely what it cannot do — so one CLI run is required,
+after which the button works normally.
+
+### NOT this customer's bug
+
+Bilal's box returned `1000`, so Firstborn is **unaffected**; his root cause is
+still open. (Consistent with his host: a DigitalOcean droplet, whose Ubuntu
+images log in as root with no default uid-1000 user, so `broadcast` got 1000
+cleanly.) This fix stands on its own — it would bite AWS/GCP-style installs —
+but the original report needs separate diagnosis.
+
+## Open — silent-failure paths still unfixed (2026-08-21)
+
+Found while reproducing the above. None are fixed in this branch; all produce
+the identical feedback-free "Upgrade in Progress" screen.
+
+- [ ] `trigger.sh:33-38` deletes the trigger file BEFORE running the upgrade
+      and then logs `upgrade to version X completed` **unconditionally**,
+      never checking the exit code. A completely failed upgrade produces a log
+      claiming success, with the trigger already consumed. Never trust that
+      log line — confirm with `.current_version` and the running image tag
+- [ ] The "Upgrade in Progress" UI is fire-and-forget:
+      `upgrade_trigger_controller.js` ignores the fetch response entirely and
+      `create_trigger` returns bare `head :ok` / `:unprocessable_entity`, so
+      no failure ever reaches the operator. `upgrade_refusal_reason` is stored
+      but never rendered
+- [ ] There is no trigger *service* — upgrades are driven only by the cron
+      entry `* * * * * broadcast.sh trigger`. The `broadcast-logs-watcher`
+      unit watches the same directory but acts on `logs-stream.txt` only
+      (`logs-trigger-watcher.sh:52`) and ignores `upgrade.txt`. A dead cron
+      therefore produces the exact reported symptom. Decisive check: an
+      `upgrade.txt` still sitting in the triggers dir means nothing consumed
+      it. Liveness proof: `monitor.log` mtime vs `date` (idle `trigger` runs
+      write nothing, so its own log is not a liveness signal)
+- [ ] Consider a `diagnose` check for the container-uid mismatch — exactly the
+      invisible failure that tool exists to surface
+
 ## Log persistence across compose down (2026-08-03, TDD — sprint item 1)
 
 The last open item from the firstborngroup incident: the systemd unit's

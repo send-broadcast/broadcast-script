@@ -17,6 +17,45 @@ check_root() {
   fi
 }
 
+# uid:gid the Broadcast app/job containers run as — fixed by the image's
+# Dockerfile (`USER 1000:1000`), independent of any host user.
+BROADCAST_CONTAINER_UID="${BROADCAST_CONTAINER_UID:-1000}"
+BROADCAST_CONTAINER_GID="${BROADCAST_CONTAINER_GID:-1000}"
+
+# Directories (relative to /opt/broadcast) that the containers WRITE to at
+# runtime through docker-compose.yml bind mounts: upload storage, user
+# uploads, the upgrade/backup trigger files, and Thruster's TLS material.
+#
+# app/monitor is deliberately NOT here. It is the one bind mount the traffic
+# runs the other way on: the HOST writes it (monitor.sh, as the broadcast
+# user via `su`) and the container only reads it (Installation#
+# gather_system_info). Handing it to the container uid locks the writer out
+# and host metrics silently stop updating every minute. Read access needs
+# nothing but the mode 755 these dirs already carry.
+broadcast_container_writable_dirs() {
+  echo "app/storage app/uploads app/triggers ssl"
+}
+
+# Re-asserts container-uid ownership on the container-written directories.
+#
+# The broad `chown -R broadcast:broadcast /opt/broadcast` passes these dirs
+# to the host broadcast user, whose uid is 1000 only by coincidence.
+# `useradd broadcast` takes the next free uid, and on hosts where uid 1000
+# is already occupied (most cloud images ship a default uid-1000 user like
+# ubuntu/admin/ec2-user) broadcast lands on 1001+. The dirs are mode 755
+# (owner-only write), so every container write then fails: the dashboard's
+# Upgrade button writes no trigger file (silent no-op, customer report
+# 2026-08-21), uploads error, and Thruster cannot persist its certificate.
+# Call this after ANY broad chown of /opt/broadcast.
+chown_container_writable_dirs() {
+  local d
+  for d in $(broadcast_container_writable_dirs); do
+    if [ -d "/opt/broadcast/$d" ]; then
+      chown -R "${BROADCAST_CONTAINER_UID}:${BROADCAST_CONTAINER_GID}" "/opt/broadcast/$d" 2>/dev/null || true
+    fi
+  done
+}
+
 check_installation_domain() {
   if [ -f /opt/broadcast/.domain ]; then
     return
@@ -405,6 +444,8 @@ change_installation_domain() {
   
   # Ensure proper ownership
   chown -R broadcast:broadcast /opt/broadcast
+  # Re-assert container-writable dirs after the broad chown (see above)
+  chown_container_writable_dirs
   
   # Restart services to pick up new SSL certificates and configuration
   echo -e "\e[33mRestarting Broadcast services to apply changes...\e[0m"

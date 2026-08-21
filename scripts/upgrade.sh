@@ -213,6 +213,13 @@ function _upgrade_continue() {
   echo -e "\e[33mPulling Broadcast containers for version $target_version...\e[0m"
   su - broadcast -c 'cd /opt/broadcast && set -a && source .image && set +a && docker compose pull'
 
+  # Heal container-writable ownership before the containers come back: on
+  # hosts where the broadcast user is not uid 1000, older installs left the
+  # app data dirs unwritable by the container (silent upgrade-trigger and
+  # upload failures — see common.sh). The upgrade path is how existing
+  # servers pick fixes up, so re-assert it here on every upgrade.
+  chown_container_writable_dirs
+
   echo -e "\e[33mRestarting Broadcast service...\e[0m"
   systemctl start broadcast
 

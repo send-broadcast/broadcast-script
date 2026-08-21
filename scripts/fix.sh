@@ -166,6 +166,28 @@ function fix() {
     fix_did "restored broadcast:broadcast ownership of /opt/broadcast"
   fi
 
+  # The app/job containers run as uid 1000 (image: USER 1000:1000) and WRITE
+  # the bind-mounted app data dirs. The broad chown above hands them to the
+  # host broadcast user, whose uid matches 1000 only by luck — on hosts
+  # where uid 1000 was already taken at install time, the container cannot
+  # write them: the dashboard Upgrade button silently writes no trigger
+  # file, uploads fail, and Thruster cannot persist its TLS certificate.
+  # Re-assert container-uid ownership on just those dirs (must run AFTER
+  # the broad chown above, which would otherwise undo it).
+  local cdir container_dirs_ok=true
+  for cdir in $(broadcast_container_writable_dirs); do
+    if [ -d "/opt/broadcast/$cdir" ] && \
+       [ "$(stat -c %u "/opt/broadcast/$cdir" 2>/dev/null)" != "$BROADCAST_CONTAINER_UID" ]; then
+      container_dirs_ok=false
+    fi
+  done
+  if [ "$container_dirs_ok" = true ]; then
+    fix_ok "app data dirs owned by the container uid ($BROADCAST_CONTAINER_UID)"
+  else
+    chown_container_writable_dirs
+    fix_did "re-owned app data dirs to the container uid ($BROADCAST_CONTAINER_UID) so the app can write triggers/uploads/certs"
+  fi
+
   # --- .image: broadcast.service sources it before compose up; without it
   # the stack cannot start at all
   fix_section "Docker Image & Registry"
