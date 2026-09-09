@@ -150,8 +150,9 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
   # Change ownership of /opt/broadcast and all its contents to the broadcast user
   sudo chown -R broadcast:broadcast /opt/broadcast
   # ...except the dirs the containers write (uid 1000 inside the image) —
-  # must happen BEFORE the service starts below, see common.sh
-  chown_container_writable_dirs
+  # must happen BEFORE the service starts below, see common.sh. A failure is
+  # printed there; the install carries on so the operator sees it in context.
+  chown_container_writable_dirs || true
 
   set +H
   export $(grep -v '^#' /opt/broadcast/.env | xargs)
@@ -183,7 +184,7 @@ EOF
   echo -e "\e[33mSetting permissions (double checking)...\e[0m"
   sudo chown -R broadcast:broadcast /opt/broadcast
   # Re-assert container-writable dirs after the broad chown (see common.sh)
-  chown_container_writable_dirs
+  chown_container_writable_dirs || true
   # Ensure db/init-scripts is readable by the postgres container (runs as uid 70)
   sudo chmod -R o+rX /opt/broadcast/db/init-scripts
 

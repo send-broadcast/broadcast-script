@@ -36,6 +36,21 @@ broadcast_container_writable_dirs() {
   echo "app/storage app/uploads app/triggers ssl"
 }
 
+# True when anything under the container-written directories is not owned
+# by the container uid:gid. Looks at the contents, not just the directory:
+# a file deep in app/storage with the wrong owner is drift the container
+# trips over just the same.
+container_writable_dirs_need_chown() {
+  local d
+  for d in $(broadcast_container_writable_dirs); do
+    [ -d "/opt/broadcast/$d" ] || continue
+    if [ -n "$(find "/opt/broadcast/$d" \( ! -user "$BROADCAST_CONTAINER_UID" -o ! -group "$BROADCAST_CONTAINER_GID" \) -print -quit 2>/dev/null)" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Re-asserts container-uid ownership on the container-written directories.
 #
 # The broad `chown -R broadcast:broadcast /opt/broadcast` passes these dirs
@@ -47,13 +62,31 @@ broadcast_container_writable_dirs() {
 # Upgrade button writes no trigger file (silent no-op, customer report
 # 2026-08-21), uploads error, and Thruster cannot persist its certificate.
 # Call this after ANY broad chown of /opt/broadcast.
+#
+# Touches only paths whose owner is wrong. This runs on every upgrade while
+# the service is stopped, and app/storage can hold a large upload tree, so
+# a blanket chown -R would add to downtime for no gain once things are right.
+#
+# Never silent: a chown that does not take (read-only or immutable
+# filesystem) is reported by name and returned as failure. broadcast.sh runs
+# under set -e, so callers that must carry on append `|| true` once the
+# warning has been printed.
 chown_container_writable_dirs() {
-  local d
+  local d failed=""
   for d in $(broadcast_container_writable_dirs); do
-    if [ -d "/opt/broadcast/$d" ]; then
-      chown -R "${BROADCAST_CONTAINER_UID}:${BROADCAST_CONTAINER_GID}" "/opt/broadcast/$d" 2>/dev/null || true
+    [ -d "/opt/broadcast/$d" ] || continue
+    if ! find "/opt/broadcast/$d" \( ! -user "$BROADCAST_CONTAINER_UID" -o ! -group "$BROADCAST_CONTAINER_GID" \) \
+         -exec chown "${BROADCAST_CONTAINER_UID}:${BROADCAST_CONTAINER_GID}" {} + ; then
+      failed="$failed $d"
     fi
   done
+
+  if [ -n "$failed" ]; then
+    echo -e "\e[31mWarning: could not give the app container (uid ${BROADCAST_CONTAINER_UID}) ownership of:${failed}.\e[0m" >&2
+    echo -e "\e[31mUntil this is fixed the app cannot write uploads, upgrade triggers or TLS certificates. Is the filesystem read-only or immutable? Check: stat -c %u /opt/broadcast/app/triggers\e[0m" >&2
+    return 1
+  fi
+  return 0
 }
 
 check_installation_domain() {
@@ -444,8 +477,9 @@ change_installation_domain() {
   
   # Ensure proper ownership
   chown -R broadcast:broadcast /opt/broadcast
-  # Re-assert container-writable dirs after the broad chown (see above)
-  chown_container_writable_dirs
+  # Re-assert container-writable dirs after the broad chown (see above);
+  # a failure is already printed, and the domain change should still finish
+  chown_container_writable_dirs || true
   
   # Restart services to pick up new SSL certificates and configuration
   echo -e "\e[33mRestarting Broadcast services to apply changes...\e[0m"

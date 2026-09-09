@@ -129,10 +129,38 @@ test_fix_makes_app_data_dirs_writable_by_the_container() {
     local output
     output=$(sandbox_run "fix" "$FIX_ENV")
 
-    harness_assert_called "chown -R 1000:1000" \
+    harness_assert_called "chown 1000:1000" \
         "app data dirs must be re-owned to the container uid so the container can write them"
+    harness_assert_not_called "chown -R 1000:1000" \
+        "no blanket recursive chown on every fix run"
     assert_contains "$output" "container" \
         "the container-writable repair/ok line must be reported"
+}
+
+test_fix_detects_container_uid_drift_below_the_top_level_dir() {
+    # A file deep inside app/storage owned by the wrong uid is drift even when
+    # the directory itself is fine. The check must look at the contents, not
+    # just stat the directory.
+    mkdir -p "$SANDBOX_ROOT/app/storage/deep/er"
+    touch "$SANDBOX_ROOT/app/storage/deep/er/file.bin"
+    local output
+    output=$(sandbox_run "fix" "$FIX_ENV")
+
+    assert_contains "$output" "fixed: re-owned" "nested drift must be repaired, not reported ok"
+    harness_assert_called "deep/er/file.bin" "the nested file must be re-owned"
+}
+
+test_fix_reports_unfixable_when_container_uid_chown_does_not_take() {
+    harness_mock chown 'case "$*" in
+  *1000:1000*) echo "chown: Read-only file system" >&2; exit 1 ;;
+esac
+exit 0'
+    local output rc=0
+    output=$(sandbox_run "fix" "$FIX_ENV") || rc=$?
+
+    assert_contains "$output" "FAIL:" "a chown that did not take is unfixable, not fixed"
+    assert_contains "$output" "container" "the FAIL line must say what could not be re-owned"
+    assert_equals "1" "$rc" "fix must exit non-zero on an unfixable problem"
 }
 
 test_fix_leaves_the_host_written_monitor_dir_alone() {
@@ -143,7 +171,7 @@ test_fix_leaves_the_host_written_monitor_dir_alone() {
     # container-uid chown must never cover it.
     sandbox_run "fix" "$FIX_ENV" >/dev/null
 
-    harness_assert_not_called "chown -R 1000:1000 /opt/broadcast/app/monitor" \
+    harness_assert_not_called "app/monitor" \
         "app/monitor must stay writable by the host broadcast user"
 }
 
@@ -525,15 +553,11 @@ test_fix_reports_clean_on_healthy_system() {
     # Healthy: correct ownership, units present AND current, cron populated,
     # keys exist. broadcast.service must match the template — an empty or
     # stale unit is drift that fix repairs.
-    # Format-aware, like the real stat: %U is the owner NAME, %u the numeric
-    # uid. fix checks the name for /opt/broadcast and the uid for the
-    # container-written dirs, so a mock that ignores the format reports
-    # phantom drift.
-    harness_mock stat 'case "${2:-}" in
-  %u) echo "${STAT_MOCK_UID:-1000}" ;;
-  *)  echo broadcast ;;
-esac
-exit 0'
+    # stat answers the owner NAME check on /opt/broadcast. The container-uid
+    # check walks the dirs with find; sandbox files belong to the developer,
+    # never uid 1000, so a healthy system is one where find reports no drift.
+    harness_mock stat 'echo broadcast; exit 0'
+    harness_mock find 'exit 0'
     sandbox_run "create_broadcast_service" >/dev/null
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-post-upgrade-cleanup.service"
     touch "$SANDBOX_ROOT/etc/systemd/system/broadcast-logs-watcher.service"
@@ -570,6 +594,8 @@ run_fix_tests() {
     run_test "test_fix_restores_broadcast_sh_executable_bit" test_fix_restores_broadcast_sh_executable_bit
     run_test "test_fix_repairs_ownership_drift" test_fix_repairs_ownership_drift
     run_test "test_fix_makes_app_data_dirs_writable_by_the_container" test_fix_makes_app_data_dirs_writable_by_the_container
+    run_test "test_fix_detects_container_uid_drift_below_the_top_level_dir" test_fix_detects_container_uid_drift_below_the_top_level_dir
+    run_test "test_fix_reports_unfixable_when_container_uid_chown_does_not_take" test_fix_reports_unfixable_when_container_uid_chown_does_not_take
     run_test "test_fix_leaves_the_host_written_monitor_dir_alone" test_fix_leaves_the_host_written_monitor_dir_alone
     run_test "test_fix_leaves_correct_ownership_alone" test_fix_leaves_correct_ownership_alone
     run_test "test_fix_recreates_missing_sudoers_entry" test_fix_recreates_missing_sudoers_entry

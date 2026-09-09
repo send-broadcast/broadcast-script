@@ -217,8 +217,9 @@ function _upgrade_continue() {
   # hosts where the broadcast user is not uid 1000, older installs left the
   # app data dirs unwritable by the container (silent upgrade-trigger and
   # upload failures — see common.sh). The upgrade path is how existing
-  # servers pick fixes up, so re-assert it here on every upgrade.
-  chown_container_writable_dirs
+  # servers pick fixes up, so re-assert it here on every upgrade. Only paths
+  # with the wrong owner are touched, so this is cheap once things are right.
+  chown_container_writable_dirs || true
 
   echo -e "\e[33mRestarting Broadcast service...\e[0m"
   systemctl start broadcast

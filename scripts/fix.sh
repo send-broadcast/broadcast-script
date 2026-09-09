@@ -174,18 +174,14 @@ function fix() {
   # file, uploads fail, and Thruster cannot persist its TLS certificate.
   # Re-assert container-uid ownership on just those dirs (must run AFTER
   # the broad chown above, which would otherwise undo it).
-  local cdir container_dirs_ok=true
-  for cdir in $(broadcast_container_writable_dirs); do
-    if [ -d "/opt/broadcast/$cdir" ] && \
-       [ "$(stat -c %u "/opt/broadcast/$cdir" 2>/dev/null)" != "$BROADCAST_CONTAINER_UID" ]; then
-      container_dirs_ok=false
-    fi
-  done
-  if [ "$container_dirs_ok" = true ]; then
+  # The check looks inside the dirs, not just at them: a nested file with
+  # the wrong owner is drift the container trips over just the same.
+  if ! container_writable_dirs_need_chown; then
     fix_ok "app data dirs owned by the container uid ($BROADCAST_CONTAINER_UID)"
-  else
-    chown_container_writable_dirs
+  elif chown_container_writable_dirs 2>/dev/null; then
     fix_did "re-owned app data dirs to the container uid ($BROADCAST_CONTAINER_UID) so the app can write triggers/uploads/certs"
+  else
+    fix_fail "could not re-own app data dirs to the container uid ($BROADCAST_CONTAINER_UID); the app cannot write triggers/uploads/certs. Is the filesystem read-only or immutable?"
   fi
 
   # --- .image: broadcast.service sources it before compose up; without it

@@ -71,7 +71,7 @@ function trigger() {
     # Ensure /opt/broadcast and all its contents belong to broadcast:broadcast
     chown -R broadcast:broadcast /opt/broadcast
     # Re-assert container-writable dirs after the broad chown (see common.sh)
-    chown_container_writable_dirs
+    chown_container_writable_dirs || true
 
     echo "[$(date)] domains updated, restarting services"
 

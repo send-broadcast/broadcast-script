@@ -676,6 +676,50 @@ run_install_state_checks() {
         log_success "key paths owned by broadcast"
     fi
 
+    # Container-written bind mounts must belong to the container uid (1000),
+    # not the host broadcast user. The cloud images already carry a uid-1000
+    # user (ubuntu), so broadcast lands on 1001+ here and this VM is the exact
+    # host the bug bit. Say so, so a pass is known to mean something.
+    log_test "Container-written dirs are owned by the container uid"
+    local broadcast_uid
+    broadcast_uid=$(vm_exec_root "id -u broadcast" | tr -d '[:space:]')
+    if [ "$broadcast_uid" = "1000" ]; then
+        log_warn "broadcast user is uid 1000 on this VM, so the uid-mismatch scenario is not exercised"
+    else
+        log_info "broadcast user is uid $broadcast_uid (uid 1000 already taken): mismatch scenario exercised"
+    fi
+    local cdir container_dirs_ok=true
+    for cdir in app/storage app/uploads app/triggers ssl; do
+        if vm_exec_root "find /opt/broadcast/$cdir ! -user 1000 -print -quit | grep -q ."; then
+            container_dirs_ok=false
+            log_fail "/opt/broadcast/$cdir has content not owned by uid 1000"
+        fi
+    done
+    if [ "$container_dirs_ok" = true ]; then
+        log_success "app/storage, app/uploads, app/triggers and ssl are owned by uid 1000 throughout"
+    fi
+
+    # The point of the ownership: the app container must actually be able to
+    # write each mount (uploads, the dashboard's upgrade trigger, Thruster's
+    # certificate store) ...
+    log_test "App container can write its bind mounts"
+    # vm_exec_root wraps the command in single quotes, so only double quotes
+    # can appear inside it; hence the spelled-out paths rather than a loop.
+    if vm_exec_root "docker exec app sh -c \"touch /rails/storage/.smoke-write-test /rails/uploads/.smoke-write-test /rails/triggers/.smoke-write-test /rails/ssl/.smoke-write-test && rm /rails/storage/.smoke-write-test /rails/uploads/.smoke-write-test /rails/triggers/.smoke-write-test /rails/ssl/.smoke-write-test\""; then
+        log_success "container wrote and removed a file in storage, uploads, triggers and ssl"
+    else
+        log_fail "container cannot write one of its bind mounts (the dashboard Upgrade button would silently do nothing)"
+    fi
+
+    # ... while the host's monitor cron, which writes as the broadcast user,
+    # must NOT have lost app/monitor to the container uid.
+    log_test "Host monitor cron can still write app/monitor"
+    if vm_exec_root "su - broadcast -c \"touch /opt/broadcast/app/monitor/.smoke-write-test && rm /opt/broadcast/app/monitor/.smoke-write-test\""; then
+        log_success "broadcast user can write app/monitor"
+    else
+        log_fail "broadcast user cannot write app/monitor (host metrics would stop updating)"
+    fi
+
     # Update cron entry (health checks already cover monitor and trigger)
     log_test "Daily update cron job exists"
     if vm_exec_root "crontab -l 2>/dev/null | grep broadcast.sh | grep -q update"; then
