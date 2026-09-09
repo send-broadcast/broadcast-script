@@ -134,6 +134,7 @@ run_unit_tests() {
     run_test_suite "Diagnose Command" "$SCRIPT_DIR/unit/test_diagnose.sh"
     run_test_suite "Upgrade Preflight" "$SCRIPT_DIR/unit/test_preflight.sh"
     run_test_suite "Fix Command" "$SCRIPT_DIR/unit/test_fix.sh"
+    run_test_suite "Container Dir Ownership" "$SCRIPT_DIR/unit/test_container_dirs.sh"
     run_test_suite "Health Sender" "$SCRIPT_DIR/unit/test_health_sender.sh"
     run_test_suite "Auto-Recovery" "$SCRIPT_DIR/unit/test_recovery.sh"
     run_test_suite "broadcast.sh Routing" "$SCRIPT_DIR/unit/test_broadcast_routing.sh"
