@@ -310,7 +310,7 @@ bs_ask_inputs() {
   echo
   echo -e "\033[33mPoint the DNS A record of $BS_DOMAIN to this server's IP address before you continue.\033[0m"
   echo -e "\033[33mBroadcast requests its TLS certificate for that name as soon as it starts.\033[0m"
-  echo -e "\033[33mInstructions: https://sendbroadcast.net/docs/installation\033[0m"
+  echo -e "\033[33mInstructions: https://sendbroadcast.net/installation\033[0m"
   bs_ask "Press Enter to continue..."
   exec 3<&-
 }

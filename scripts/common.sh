@@ -161,7 +161,7 @@ ask_license() {
             echo -e "\e[33mThis is crucial for the proper functioning of your Broadcast installation.\e[0m"
             echo -e "\e[33mYou can do this by updating your domain's DNS settings to point to this server's IP address.\e[0m"
             echo
-            echo -e "\e[33mIf you need further instructions, please see https://sendbroadcast.net/docs/installation\e[0m"
+            echo -e "\e[33mIf you need further instructions, please see https://sendbroadcast.net/installation\e[0m"
             echo
             echo -e "\e[1;31m** DO THIS BEFORE PROCEEDING **\e[0m"
             echo
