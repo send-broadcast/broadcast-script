@@ -1,5 +1,41 @@
 # TODO
 
+## Gitignore the runtime files (2026-10-06, branch `gitignore-runtime-state`)
+
+Found on a fresh 24.04 VM install: `git status` in `/opt/broadcast` listed
+`.health_state`, `.recovery_state` and `.recovery_state.lock` as untracked.
+
+### Analysis
+
+- Scripts check for local changes with `--untracked-files=no` (update.sh,
+  install.sh, diagnose.sh), so the untracked files did not break updates. The
+  problem is noise for operators and support, who read `git status` by hand.
+- The three files are not the only ones. Scripts also write `.domain_history`,
+  `.version_history`, `.install_complete`, `.upgrade_deferred`,
+  `.edge_enabled`, `.no_auto_recovery`, `.no_auto_recovery_alerts`,
+  `.no_health_reports`, `.health_state.bak`, `.env.tmp`. Customer data in
+  `app/storage` (Rails storage, backup copies) and `db/backups` is not ignored.
+- Options:
+  1. Explicit `.gitignore` entries (chosen). Matches the existing style
+     (`.domain`, `.license`, ...). No behaviour change, no migration.
+  2. Ignore all top-level dotfiles (`/.*` plus exceptions). Shorter, but a
+     new tracked dotfile (e.g. `.shellcheckrc`) is silently skipped by
+     `git add`.
+  3. Move state to `/var/lib/broadcast`. Clean split of code and state, but
+     needs a migration on every server, changes many scripts and tests, and
+     fixes only a display problem.
+- Risk of ignoring: git overwrites an ignored file without warning when a
+  pulled commit starts to track that path. The test asserts that only
+  `.gitkeep` is tracked in `app/storage` and `db/backups`.
+
+### Steps
+
+- [x] `.gitignore`: all runtime dotfiles, `app/storage/*`, `db/backups/*`
+- [x] tests/unit/test_gitignore_runtime_files.sh (fails without the change)
+- [x] CHANGELOG
+- [ ] full suite, shellcheck
+- [ ] Ask Simon before merge/push
+
 ## One-line `curl | bash` installer (2026-10-06, branch `curl-installer`)
 
 Request from the send-broadcast session (on Simon's behalf). The site and docs
