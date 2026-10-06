@@ -213,7 +213,7 @@ function fix() {
     else
       registry_login=$(grep "^BROADCAST_REGISTRY_LOGIN=" /opt/broadcast/.env | cut -d= -f2-)
       registry_password=$(grep "^BROADCAST_REGISTRY_PASSWORD=" /opt/broadcast/.env | cut -d= -f2-)
-      su - broadcast -c "echo '$registry_password' | docker login '$registry_url' -u '$registry_login' --password-stdin" >/dev/null 2>&1 || true
+      registry_login "$registry_url" "$registry_login" "$registry_password" >/dev/null 2>&1 || true
       if grep -q "$registry_url" /home/broadcast/.docker/config.json 2>/dev/null; then
         fix_did "logged the broadcast user into the docker registry"
       else

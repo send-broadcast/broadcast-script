@@ -19,6 +19,8 @@ tests/
 │   ├── test_version_functions.sh  # Real version/config helpers (common.sh, broadcast.sh)
 │   ├── test_upgrade_downgrade.sh  # Real _upgrade_continue/_downgrade_continue flow
 │   ├── test_restore_functions.sh  # Real restore() pipeline
+│   ├── test_bootstrap_install.sh  # Real curl|bash bootstrap (install.sh), piped into bash
+│   ├── test_install.sh            # Real install(): cron, apt, registry login, reboot
 │   ├── test_logs_streaming.sh     # Real log streaming/watcher reconcile
 │   └── test_docker_references.sh  # Compose file consistency checks
 ├── integration/                   # Integration tests for complete workflows
@@ -102,6 +104,28 @@ Test the real functions from the management scripts in isolation.
   restart ordering, cleanup-service and logs-watcher installation branches,
   encryption-key backfill without clobbering existing keys, version history
 - `_downgrade_continue`: prune → pull → start sequencing and history
+
+**test_bootstrap_install.sh** (real `install.sh` at the repo root):
+- Piped into bash exactly as `curl | sudo bash` runs it, with PATH limited
+  to recording mocks plus named coreutils
+- Existing installations (app/.env, db/.env, database, systemd unit) are
+  refused with exit 3 and a byte-for-byte unchanged tree; unknown
+  directories are refused; partial checkouts are resumed, never deleted
+- No terminal and no BROADCAST_DOMAIN/BROADCAST_LICENSE fails fast with
+  exit 2 before anything is fetched
+- The installer gets the terminal or /dev/null, never the piped script;
+  the license is validated before install; a rejected key is removed
+- Root, Ubuntu release, architecture, ports 80/443, memory and disk
+  checks; git installed when missing; --no-reboot and BROADCAST_REF
+- A download truncated at any point runs nothing; shellcheck is clean
+
+**test_install.sh** (real `install()` and installer helpers in `common.sh`):
+- Two install runs leave each cron job exactly once (unrelated jobs kept)
+- Every apt call is non-interactive and waits for the apt lock
+- The registry password is passed on stdin, never in a command line
+- fail2ban's .deb is checksum-verified before dpkg; a mismatch stops
+- The reboot is scheduled (`shutdown -r +1`) or skipped with --no-reboot
+- Prompts stop with a message at end of input; invalid domains re-prompt
 
 **test_restore_functions.sh** (real `restore.sh`):
 - Full restore() pipeline against a scratch root: file resolution,

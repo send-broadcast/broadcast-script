@@ -1,5 +1,73 @@
 # TODO
 
+## One-line `curl | bash` installer (2026-10-06, branch `curl-installer`)
+
+Request from the send-broadcast session (on Simon's behalf). The site and docs
+tell customers to run `rm -rf /opt/broadcast && git clone ... && ./broadcast.sh
+install`. Re-running that on a live server deletes the Postgres data
+(`db/postgres-data`) and the encryption keys (`app/.env`). Goal:
+
+    curl -fsSL https://sendbroadcast.net/install.sh | sudo bash
+    curl -fsSL https://sendbroadcast.net/install.sh | sudo BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=XXXX bash
+
+sendbroadcast.net/install.sh will 302 to the raw `install.sh` in this repo.
+
+### Decisions
+
+- **Never delete /opt/broadcast.** Refuse (exit 3) when it holds an install:
+  `app/.env`, `db/.env`, non-empty `db/postgres-data`, or the systemd unit.
+- **Partial earlier clone** (a broadcast-script checkout with none of the
+  above, maybe `.domain`/`.license` from a failed prompt): resume in place.
+  Fast-forward the checkout; env vars overwrite `.domain`/`.license`. Nothing
+  in it is user data, and deleting it would need the `rm -rf` we are removing.
+- **Any other non-empty dir:** refuse, touch nothing.
+- **Ref: `main`.** The project ships rolling with no tags, and the nightly
+  `update` cron pulls `main` anyway, so a tag pin would be undone within a day.
+  `BROADCAST_REF` overrides (used to test a branch before merge).
+- **TTY:** the child installer gets `/dev/tty` when it can be opened. Without
+  one, both env vars (or existing files) are required, else exit 2 before any
+  change. Note: with `set -e`, `read` at EOF exits broadcast.sh — it does not
+  loop — but under `curl | bash` the child's `read` would consume the rest of
+  the piped script as the domain. Redirecting stdin is the real fix.
+- **License validated** (`broadcast.sh validate_license`) before `install`
+  starts apt/docker work; a rejected key is removed so a re-run starts clean.
+- **Log:** `/var/log/broadcast-install.log` (0600). Not inside /opt/broadcast:
+  `git clone` needs an empty dir, and the log must survive a failed clone.
+- **Reboot:** scheduled with `shutdown -r +1` so the script exits 0 and an
+  agent's SSH command returns before the reboot. `--no-reboot` /
+  `BROADCAST_NO_REBOOT=1` skips it.
+
+### Verified findings in the existing installer
+
+- [x] Cron jobs appended without dedupe — real; a re-run duplicated all 5.
+- [x] apt calls can block on needrestart/debconf dialogs — real; `sudo` also
+      drops `DEBIAN_FRONTEND`, so it must be passed through sudo explicitly.
+- [x] Unconditional `sudo reboot` — real; replaced as above.
+- [x] `.image` written after pull — NOT a bug: `broadcast.sh` runs
+      `set_docker_image latest` before `install()`. The trailing block in
+      install() only rewrote the same value; removed as dead code.
+- [x] Registry password on the `su -c` command line (visible in `ps`) — real;
+      now passed on stdin (install.sh and fix.sh).
+- [x] `export $(grep ... | xargs)` breaks on spaces — real; replaced with a
+      line parser in `load_registry_info`.
+- [x] fail2ban .deb not checksummed — real; sha256 pinned.
+- [x] Preflight: RAM/disk warnings, ports 80/443 hard failure.
+- [ ] DNS A-record check — deferred (needs a public-IP lookup service).
+
+### Steps
+
+- [ ] `install.sh` bootstrap at repo root
+- [ ] installer fixes in scripts/install.sh + common.sh + fix.sh
+- [ ] unit tests: tests/unit/test_bootstrap_install.sh + installer fixes
+- [ ] shellcheck
+- [ ] full suite `bash tests/run_all_tests.sh`
+- [ ] E2E on fresh Ubuntu 24.04 VMs (Vagrant+QEMU) from the branch raw URL:
+      (a) interactive TTY, (b) non-interactive env vars over ssh,
+      (c) re-run on installed server refuses and changes nothing,
+      (d) no TTY + no env vars fails fast
+- [ ] CHANGELOG, README
+- [ ] Ask Simon before push/merge; report to send-broadcast-6b
+
 ## Container-uid ownership of bind-mounted app dirs (2026-08-21, TDD)
 
 Customer report (Bilal Iftikhar, Firstborn Group, 2026-08-21): clicking
