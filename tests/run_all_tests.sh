@@ -139,6 +139,8 @@ run_unit_tests() {
     run_test_suite "Auto-Recovery" "$SCRIPT_DIR/unit/test_recovery.sh"
     run_test_suite "broadcast.sh Routing" "$SCRIPT_DIR/unit/test_broadcast_routing.sh"
     run_test_suite "Two-Factor Recovery" "$SCRIPT_DIR/unit/test_two_factor.sh"
+    run_test_suite "Bootstrap Installer (curl | bash)" "$SCRIPT_DIR/unit/test_bootstrap_install.sh"
+    run_test_suite "Install Function" "$SCRIPT_DIR/unit/test_install.sh"
     run_test_suite "System Service Scripts" "$SCRIPT_DIR/unit/test_system_services.sh"
     run_test_suite "Docker Reference Consistency" "$SCRIPT_DIR/unit/test_docker_references.sh"
 }

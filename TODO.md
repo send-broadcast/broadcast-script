@@ -1,5 +1,86 @@
 # TODO
 
+## One-line `curl | bash` installer (2026-10-06, branch `curl-installer`)
+
+Request from the send-broadcast session (on Simon's behalf). The site and docs
+tell customers to run `rm -rf /opt/broadcast && git clone ... && ./broadcast.sh
+install`. Re-running that on a live server deletes the Postgres data
+(`db/postgres-data`) and the encryption keys (`app/.env`). Goal:
+
+    curl -fsSL https://sendbroadcast.net/install.sh | sudo bash
+    curl -fsSL https://sendbroadcast.net/install.sh | sudo BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=XXXX bash
+
+sendbroadcast.net/install.sh will 302 to the raw `install.sh` in this repo.
+
+### Decisions
+
+- **Never delete /opt/broadcast.** Refuse (exit 3) when it holds an install:
+  `app/.env`, `db/.env`, non-empty `db/postgres-data`, or the systemd unit.
+- **Partial earlier clone** (a broadcast-script checkout with none of the
+  above, maybe `.domain`/`.license` from a failed prompt): resume in place.
+  Fast-forward the checkout; env vars overwrite `.domain`/`.license`. Nothing
+  in it is user data, and deleting it would need the `rm -rf` we are removing.
+- **Any other non-empty dir:** refuse, touch nothing.
+- **Ref: `main`.** The project ships rolling with no tags, and the nightly
+  `update` cron pulls `main` anyway, so a tag pin would be undone within a day.
+  `BROADCAST_REF` overrides (used to test a branch before merge).
+- **TTY:** the bootstrap's top-level shell asks every question (domain, key,
+  confirm, DNS reminder) before anything changes; the installer always gets
+  stdin from /dev/null. Found in E2E on 26.04: sudo-rs runs `curl | sudo
+  bash` on its own pty, and a CHILD that reads the terminal (or a tee writing
+  while the shell reads) is stopped by job control — the first design (hand
+  the child /dev/tty) hung at the first prompt. Reproduced with a matrix of
+  patterns on both sudos (scratch experiments, 3 rounds each). Without a
+  terminal, both env vars are required, else exit 2 before any change.
+- **Key pre-check:** POST /license/check (status only) before anything
+  changes: 401 re-asks interactively, exits 1 non-interactively; a network
+  error defers to the installer's own validate_license.
+- **License validated** (`broadcast.sh validate_license`) before `install`
+  starts apt/docker work; a rejected key is removed so a re-run starts clean.
+- **Log:** `/var/log/broadcast-install.log` (0600). Not inside /opt/broadcast:
+  `git clone` needs an empty dir, and the log must survive a failed clone.
+- **Reboot:** scheduled with `shutdown -r +1` so the script exits 0 and an
+  agent's SSH command returns before the reboot. `--no-reboot` /
+  `BROADCAST_NO_REBOOT=1` skips it.
+
+### Verified findings in the existing installer
+
+- [x] Cron jobs appended without dedupe — real; a re-run duplicated all 5.
+- [x] apt calls can block on needrestart/debconf dialogs — real; `sudo` also
+      drops `DEBIAN_FRONTEND`, so it must be passed through sudo explicitly.
+- [x] Unconditional `sudo reboot` — real; replaced as above.
+- [x] `.image` written after pull — NOT a bug: `broadcast.sh` runs
+      `set_docker_image latest` before `install()`. The trailing block in
+      install() only rewrote the same value; removed as dead code.
+- [x] Registry password on the `su -c` command line (visible in `ps`) — real;
+      now passed on stdin (install.sh and fix.sh).
+- [x] `export $(grep ... | xargs)` breaks on spaces — real; replaced with a
+      line parser in `load_registry_info`.
+- [x] fail2ban .deb not checksummed — real; sha256 pinned.
+- [x] Preflight: RAM/disk warnings, ports 80/443 hard failure.
+- [ ] DNS A-record check — deferred (needs a public-IP lookup service).
+
+### Steps
+
+- [x] `install.sh` bootstrap at repo root
+- [x] installer fixes in scripts/install.sh + common.sh + fix.sh
+- [x] unit tests: tests/unit/test_bootstrap_install.sh + test_install.sh
+- [x] shellcheck
+- [x] full suite `bash tests/run_all_tests.sh`
+- [x] E2E harness tests/smoke/test_bootstrap_e2e.sh (noninteractive,
+      interactive, legacy-upgrade) on 24.04 + 26.04
+- [x] Upgrade check: legacy main install -> branch upgrade, CLI upgrade,
+      dashboard-trigger upgrade (30/30 on both releases, first run)
+- [x] E2E on fresh Ubuntu 24.04 AND 26.04 VMs (Vagrant+QEMU, arm64) from the
+      branch raw URL (sha256 6e8401a3111b, commit 8e118bc), 2026-10-06:
+      interactive 12/12 + 12/12, noninteractive 34/34 + 34/34,
+      legacy-upgrade 30/30 + 30/30. (a) TTY with a rejected domain and key,
+      (b) ssh -T env vars, exit 0, reboot scheduled and observed,
+      (c) re-run exit 3 with unchanged fingerprint (TTY and no-TTY),
+      (d) exit 2 in 0s with nothing written. amd64 not run (no x86 HVF here).
+- [x] CHANGELOG, README
+- [ ] Ask Simon before push/merge; report to send-broadcast-6b
+
 ## Container-uid ownership of bind-mounted app dirs (2026-08-21, TDD)
 
 Customer report (Bilal Iftikhar, Firstborn Group, 2026-08-21): clicking

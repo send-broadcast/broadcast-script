@@ -419,13 +419,13 @@ run_installer() {
     local start_time=$(date +%s)
 
     if [ "$FLAG_VERBOSE" = true ]; then
-        cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c 'cd /opt/broadcast && ./broadcast.sh install'" 2>&1 || {
+        cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c 'cd /opt/broadcast && BROADCAST_NO_REBOOT=1 ./broadcast.sh install'" 2>&1 || {
             local exit_code=$?
             log_fail "Installer exited with code $exit_code"
             return $exit_code
         }
     else
-        cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c 'cd /opt/broadcast && ./broadcast.sh install'" >/dev/null 2>&1 || {
+        cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c 'cd /opt/broadcast && BROADCAST_NO_REBOOT=1 ./broadcast.sh install'" >/dev/null 2>&1 || {
             local exit_code=$?
             log_fail "Installer exited with code $exit_code"
             return $exit_code

@@ -10,14 +10,14 @@ function install() {
   fi
 
   # Update packages
-  sudo apt-get update
-  sudo apt-get upgrade -y
+  apt_get update
+  apt_get upgrade -y
 
   # Ensure /opt/broadcast exists and has correct ownership
   sudo chown -R broadcast:broadcast /opt/broadcast
 
   # Setup Uncomplicated Firewall
-  sudo apt-get install ufw -y
+  apt_get install ufw -y
   sudo ufw default deny incoming
   sudo ufw default allow outgoing
 
@@ -25,11 +25,23 @@ function install() {
   echo "Installing and configuring fail2ban..."
 
   # Unfortunately, fail2ban <=> Ubuntu 24.04 LTS is not compatible due to Python syntax issues
-  sudo wget -O fail2ban.deb https://github.com/fail2ban/fail2ban/releases/download/1.1.0/fail2ban_1.1.0-1.upstream1_all.deb
-  sudo dpkg -i fail2ban.deb
+  # The package comes straight from GitHub, outside apt's signature checks,
+  # so it is pinned to the sha256 of the 1.1.0 release asset and refused if
+  # it differs.
+  local fail2ban_url="https://github.com/fail2ban/fail2ban/releases/download/1.1.0/fail2ban_1.1.0-1.upstream1_all.deb"
+  local fail2ban_sha256="4ef39bbda961aa4c4e97a099e962cf9863d66edf2808caab668ddcd4ed2ebda2"
+  local fail2ban_deb
+  fail2ban_deb=$(mktemp)
+  curl -fsSL --retry 3 -o "$fail2ban_deb" "$fail2ban_url"
+  if ! echo "$fail2ban_sha256  $fail2ban_deb" | sha256sum -c --status -; then
+    rm -f "$fail2ban_deb"
+    echo -e "\e[31mError: the fail2ban package from GitHub does not match its expected checksum. Install stopped.\e[0m"
+    exit 1
+  fi
+  sudo dpkg -i "$fail2ban_deb"
   sudo systemctl enable fail2ban
   sudo systemctl start fail2ban
-  sudo rm fail2ban.deb # Cleanup
+  rm -f "$fail2ban_deb" # Cleanup
 
   # Allow ports 22, 443, and 80
   sudo ufw allow 22/tcp
@@ -57,10 +69,10 @@ function install() {
   sudo timedatectl set-timezone UTC
 
   # Install network time protocol
-  sudo apt-get install chrony -y
+  apt_get install chrony -y
 
   # Set up unattended upgrades without user interaction
-  sudo apt-get install unattended-upgrades -y
+  apt_get install unattended-upgrades -y
   echo 'APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 APT::Periodic::AutocleanInterval "7";
@@ -70,8 +82,8 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
   echo "Installing Docker..."
 
   # Add Docker's official GPG key
-  sudo apt-get update
-  sudo apt-get install -y ca-certificates curl
+  apt_get update
+  apt_get install -y ca-certificates curl
   sudo install -m 0755 -d /etc/apt/keyrings
   sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
   sudo chmod a+r /etc/apt/keyrings/docker.asc
@@ -81,7 +93,7 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
     "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
     $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
     sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-  sudo apt-get update
+  apt_get update
 
   # Read domain from configuration file
   if [ ! -f /opt/broadcast/.domain ]; then
@@ -142,7 +154,7 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
   fi
 
   # Install Docker packages
-  sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+  apt_get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
   # Add broadcast user to the docker group
   sudo usermod -aG docker broadcast
@@ -154,10 +166,8 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
   # printed there; the install carries on so the operator sees it in context.
   chown_container_writable_dirs || true
 
-  set +H
-  export $(grep -v '^#' /opt/broadcast/.env | xargs)
-  su - broadcast -c "echo '$BROADCAST_REGISTRY_PASSWORD' | docker login '$BROADCAST_REGISTRY_URL' -u '$BROADCAST_REGISTRY_LOGIN' --password-stdin"
-  set -H
+  load_registry_info
+  registry_login "$BROADCAST_REGISTRY_URL" "$BROADCAST_REGISTRY_LOGIN" "$BROADCAST_REGISTRY_PASSWORD"
 
   echo -e "\e[33mDocker installation completed!\e[0m"
 
@@ -175,11 +185,11 @@ EOF
 
   echo -e "\e[33mSetting up cron jobs...\e[0m"
   mkdir -p /opt/broadcast/logs/cron
-  (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh monitor >> /opt/broadcast/logs/cron/monitor.log 2>&1") | crontab -
-  (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh trigger >> /opt/broadcast/logs/cron/trigger.log 2>&1") | crontab -
-  (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh health >> /opt/broadcast/logs/cron/health.log 2>&1") | crontab -
-  (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh recover >> /opt/broadcast/logs/cron/recover.log 2>&1") | crontab -
-  (crontab -l 2>/dev/null || true; echo "0 0 * * * /opt/broadcast/broadcast.sh update >> /opt/broadcast/logs/cron/update.log 2>&1") | crontab -
+  ensure_cron_entry "* * * * *" monitor
+  ensure_cron_entry "* * * * *" trigger
+  ensure_cron_entry "* * * * *" health
+  ensure_cron_entry "* * * * *" recover
+  ensure_cron_entry "0 0 * * *" update
 
   echo -e "\e[33mSetting permissions (double checking)...\e[0m"
   sudo chown -R broadcast:broadcast /opt/broadcast
@@ -190,7 +200,7 @@ EOF
 
   # Install inotify-tools for log streaming trigger watcher
   echo -e "\e[33mInstalling inotify-tools for log streaming...\e[0m"
-  sudo apt-get install -y inotify-tools
+  apt_get install -y inotify-tools
 
   # Set up the log streaming trigger watcher service
   echo -e "\e[33mSetting up log streaming trigger watcher service...\e[0m"
@@ -202,7 +212,7 @@ EOF
   sudo systemctl start broadcast-logs-watcher
 
   # Install logrotate
-  sudo apt-get install -y logrotate
+  apt_get install -y logrotate
 
   # Set up logrotate for Broadcast logs
   echo "Setting up logrotate for Broadcast logs..."
@@ -236,25 +246,19 @@ EOF
   echo
   echo -e "Thank you for choosing Broadcast!"
   echo
-  echo -e "\e[31mWe will reboot your system now.\e[0m"
-  echo
-  echo -e "\e[93mWhen your system is rebooted, you can access the web interface at https://$domain to set up your admin account.\e[0m"
-
-  # More reliable architecture detection using multiple methods
-  is_arm() {
-    local arch
-    # Try different methods to detect ARM
-    arch=$(dpkg --print-architecture 2>/dev/null || arch 2>/dev/null || uname -m 2>/dev/null)
-    [[ "$arch" =~ ^(arm64|aarch64|armv8|arm)$ ]] && return 0 || return 1
-  }
-
-  if is_arm; then
-    echo "DOCKER_IMAGE=gitea.hostedapp.org/broadcast/broadcast-arm:latest" > /opt/broadcast/.image
-    echo "TARGETARCH=arm64" >> /opt/broadcast/.image
+  if [ "${BROADCAST_NO_REBOOT:-0}" = "1" ]; then
+    echo -e "\e[33mReboot skipped (--no-reboot). Broadcast is running; reboot when convenient to finish applying system updates: sudo reboot\e[0m"
+    echo
+    echo -e "\e[93mOpen https://$domain to set up your admin account.\e[0m"
   else
-    echo "DOCKER_IMAGE=gitea.hostedapp.org/broadcast/broadcast:latest" > /opt/broadcast/.image
+    echo -e "\e[31mThis server will reboot in 1 minute to finish applying system updates (cancel with: sudo shutdown -c).\e[0m"
+    echo
+    echo -e "\e[93mWhen your system is rebooted, you can access the web interface at https://$domain to set up your admin account.\e[0m"
   fi
-  chown broadcast:broadcast /opt/broadcast/.image
+
+  # .image (the architecture-specific image) is written by set_docker_image
+  # in broadcast.sh before install() runs, so the pull above already used
+  # the right image for this CPU.
 
   if [ -f /opt/broadcast/.install_complete ]; then
     install_url=$(cat /opt/broadcast/.install_complete)
@@ -263,5 +267,10 @@ EOF
     fi
   fi
 
-  sudo reboot
+  # Scheduled rather than immediate, so the installer exits cleanly with
+  # status 0 and a remote session (an agent over SSH) sees the result
+  # before the connection drops.
+  if [ "${BROADCAST_NO_REBOOT:-0}" != "1" ]; then
+    sudo shutdown -r +1 "Broadcast installation complete; rebooting." || true
+  fi
 }

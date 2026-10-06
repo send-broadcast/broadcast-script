@@ -96,16 +96,32 @@ check_installation_domain() {
 
   while true; do
     echo -e "\e[32mPlease enter the domain name for this server (eg. broadcast.example.com): \e[0m"
-    read installation_domain
-    if [ ! -z "$installation_domain" ]; then
-      echo "$installation_domain" > /opt/broadcast/.domain
-      break
-    else
+    prompt_read installation_domain
+    if [ -z "$installation_domain" ]; then
       echo
       echo -e "\e[31mDomain name cannot be empty. Please try again.\e[0m"
       echo
+    elif ! echo "$installation_domain" | grep -qE '^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'; then
+      echo
+      echo -e "\e[31m'$installation_domain' is not a valid domain name. Please try again.\e[0m"
+      echo
+    else
+      echo "$installation_domain" > /opt/broadcast/.domain
+      break
     fi
   done
+}
+
+# read for the interactive prompts. At end of input (stdin is /dev/null or a
+# closed pipe, as under `curl | bash` or an SSH command with no terminal)
+# there is no one to answer, so say so and stop instead of exiting silently.
+prompt_read() {
+  if ! IFS= read -r "$1"; then
+    echo
+    echo -e "\e[31mNo input available to answer the prompt (no terminal).\e[0m" >&2
+    echo "Run the installer from a terminal, or create /opt/broadcast/.domain and /opt/broadcast/.license first." >&2
+    exit 1
+  fi
 }
 
 check_license() {
@@ -120,7 +136,7 @@ ask_license() {
   while true; do
     echo
     echo -e "\e[32mPlease enter your license key: \e[0m"
-    read license_key
+    prompt_read license_key
     if [ -z "$license_key" ]; then
       echo
       echo -e "\e[31mLicense key cannot be empty. Please try again.\e[0m"
@@ -129,13 +145,13 @@ ask_license() {
       echo
       echo -e "\e[34mYou entered: $license_key\e[0m"
       echo -e "\e[33mIs this correct? (y/n): \e[0m"
-      read confirm
+      prompt_read confirm
       if [[ $confirm =~ ^[Yy]$ ]]; then
         local domain=$(cat "$domain_file")
         echo
         echo -e "\e[34mConfirm you want to install for the domain [$domain] with license key [$license_key]?\e[0m"
         echo -e "\e[33mProceed with installation? [y/n]\e[0m"
-        read install_confirm
+        prompt_read install_confirm
         if [[ $install_confirm =~ ^[Yy]$ ]]; then
           echo
           echo "$license_key" > "$license_file"
@@ -150,7 +166,7 @@ ask_license() {
             echo -e "\e[1;31m** DO THIS BEFORE PROCEEDING **\e[0m"
             echo
             echo -e "\e[1;31mOnce you've completed this step, press enter to continue...\e[0m"
-            read
+            prompt_read _
             break
           else
             rm -f "$license_file"
@@ -176,7 +192,7 @@ validate_license() {
   # Check if jq is installed
   if ! command -v jq &> /dev/null; then
     echo "jq is not installed. Installing..."
-    sudo apt-get update && sudo apt-get install -y jq
+    apt_get update && apt_get install -y jq
   fi
 
   if [ ! -f "$license_file" ]; then
@@ -303,13 +319,52 @@ print_license_summary() {
   echo
 }
 
+# Exports the BROADCAST_REGISTRY_* credentials from .env. Parsed line by
+# line rather than `export $(... | xargs)`, which split a value containing a
+# space into separate words and broke the export.
 load_registry_info() {
-  if [ -f /opt/broadcast/.env ]; then
-    export $(grep -v '^#' /opt/broadcast/.env | xargs)
-  else
+  if [ ! -f /opt/broadcast/.env ]; then
     echo -e "\e[31mEnvironment file not found. Please validate your license first.\e[0m"
     return 1
   fi
+  local line key
+  while IFS= read -r line || [ -n "$line" ]; do
+    key="${line%%=*}"
+    case "$key" in
+      BROADCAST_REGISTRY_URL|BROADCAST_REGISTRY_LOGIN|BROADCAST_REGISTRY_PASSWORD)
+        export "$key=${line#*=}"
+        ;;
+    esac
+  done < /opt/broadcast/.env
+}
+
+# Logs the broadcast user into the image registry. The password goes in on
+# stdin: inside the `su -c` command string it was visible to every user in
+# the process list for as long as the login took.
+registry_login() {
+  local url="$1" login="$2" password="$3"
+  printf '%s\n' "$password" | su - broadcast -c "docker login '$url' -u '$login' --password-stdin"
+}
+
+# apt-get that never stops at a question. Without this a fresh 24.04 server
+# can hold an unattended install at a needrestart or debconf dialog. sudo
+# resets the environment, so the variables go through env inside sudo; the
+# lock timeout waits out the unattended-upgrades run a new server starts at
+# first boot instead of failing on its lock.
+apt_get() {
+  sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a \
+    apt-get -o DPkg::Lock::Timeout=600 \
+    -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$@"
+}
+
+# Adds the root cron entry for `broadcast.sh <command>` unless one is there,
+# so running the installer again does not schedule every job twice.
+ensure_cron_entry() {
+  local schedule="$1" command="$2"
+  if crontab -l 2>/dev/null | grep -q "broadcast.sh $command "; then
+    return 0
+  fi
+  (crontab -l 2>/dev/null || true; echo "$schedule /opt/broadcast/broadcast.sh $command >> /opt/broadcast/logs/cron/$command.log 2>&1") | crontab -
 }
 
 # Version validation helpers for semantic version format checking
