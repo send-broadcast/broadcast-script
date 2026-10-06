@@ -24,11 +24,17 @@ sendbroadcast.net/install.sh will 302 to the raw `install.sh` in this repo.
 - **Ref: `main`.** The project ships rolling with no tags, and the nightly
   `update` cron pulls `main` anyway, so a tag pin would be undone within a day.
   `BROADCAST_REF` overrides (used to test a branch before merge).
-- **TTY:** the child installer gets `/dev/tty` when it can be opened. Without
-  one, both env vars (or existing files) are required, else exit 2 before any
-  change. Note: with `set -e`, `read` at EOF exits broadcast.sh — it does not
-  loop — but under `curl | bash` the child's `read` would consume the rest of
-  the piped script as the domain. Redirecting stdin is the real fix.
+- **TTY:** the bootstrap's top-level shell asks every question (domain, key,
+  confirm, DNS reminder) before anything changes; the installer always gets
+  stdin from /dev/null. Found in E2E on 26.04: sudo-rs runs `curl | sudo
+  bash` on its own pty, and a CHILD that reads the terminal (or a tee writing
+  while the shell reads) is stopped by job control — the first design (hand
+  the child /dev/tty) hung at the first prompt. Reproduced with a matrix of
+  patterns on both sudos (scratch experiments, 3 rounds each). Without a
+  terminal, both env vars are required, else exit 2 before any change.
+- **Key pre-check:** POST /license/check (status only) before anything
+  changes: 401 re-asks interactively, exits 1 non-interactively; a network
+  error defers to the installer's own validate_license.
 - **License validated** (`broadcast.sh validate_license`) before `install`
   starts apt/docker work; a rejected key is removed so a re-run starts clean.
 - **Log:** `/var/log/broadcast-install.log` (0600). Not inside /opt/broadcast:
@@ -56,16 +62,20 @@ sendbroadcast.net/install.sh will 302 to the raw `install.sh` in this repo.
 
 ### Steps
 
-- [ ] `install.sh` bootstrap at repo root
-- [ ] installer fixes in scripts/install.sh + common.sh + fix.sh
-- [ ] unit tests: tests/unit/test_bootstrap_install.sh + installer fixes
-- [ ] shellcheck
-- [ ] full suite `bash tests/run_all_tests.sh`
+- [x] `install.sh` bootstrap at repo root
+- [x] installer fixes in scripts/install.sh + common.sh + fix.sh
+- [x] unit tests: tests/unit/test_bootstrap_install.sh + test_install.sh
+- [x] shellcheck
+- [x] full suite `bash tests/run_all_tests.sh`
+- [x] E2E harness tests/smoke/test_bootstrap_e2e.sh (noninteractive,
+      interactive, legacy-upgrade) on 24.04 + 26.04
+- [x] Upgrade check: legacy main install -> branch upgrade, CLI upgrade,
+      dashboard-trigger upgrade (30/30 on both releases, first run)
 - [ ] E2E on fresh Ubuntu 24.04 VMs (Vagrant+QEMU) from the branch raw URL:
       (a) interactive TTY, (b) non-interactive env vars over ssh,
       (c) re-run on installed server refuses and changes nothing,
       (d) no TTY + no env vars fails fast
-- [ ] CHANGELOG, README
+- [x] CHANGELOG, README
 - [ ] Ask Simon before push/merge; report to send-broadcast-6b
 
 ## Container-uid ownership of bind-mounted app dirs (2026-08-21, TDD)

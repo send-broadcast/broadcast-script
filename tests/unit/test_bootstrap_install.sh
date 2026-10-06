@@ -52,13 +52,17 @@ VERSION_ID="24.04"
 ID=ubuntu
 EOF
     echo "MemTotal:        4027244 kB" > "$BS/meminfo"
-    echo "TTY-ANSWER" > "$BS/tty"
+    # The terminal: one answer per line, read in order by the bootstrap
+    printf 'mail.example.com\nKEY-1\ny\n\n' > "$BS/tty"
 
     bs_mock id 'if [ "${1:-}" = "-u" ]; then echo "${MOCK_UID:-0}"; fi'
     bs_mock uname 'echo "${MOCK_ARCH:-x86_64}"'
     bs_mock df 'echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "/dev/sda1 41000000 1000000 ${MOCK_DF_FREE_KB:-40000000} 3% /"'
     bs_mock ss 'printf "%s" "${MOCK_SS:-}"'
-    bs_mock curl 'exit 0'
+    # curl: the license pre-check prints an HTTP status. MOCK_LICENSE_CODE
+    # sets it; a "reject-once" file makes the first answer 401.
+    bs_mock curl 'if [ -f "'"$BS"'/reject-once" ]; then rm -f "'"$BS"'/reject-once"; printf 401; exit 0; fi
+printf "%s" "${MOCK_LICENSE_CODE:-200}"'
     bs_mock jq 'exit 0'
     bs_mock apt-get 'echo "apt-get-env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-}" >> "'"$BS_CALLS"'"
 case " $* " in *" git"*) cp "'"$BS"'/git-mock" "'"$BS"'/bin/git" ;; esac
@@ -104,6 +108,7 @@ SYSTEMD_UNIT="$BS/etc/broadcast.service"
 OS_RELEASE_FILE="$BS/os-release"
 MEMINFO_FILE="$BS/meminfo"
 TTY_DEVICE="\${MOCK_TTY:-$BS/no-tty}"
+LICENSE_CHECK_URL="https://license.invalid/check"
 broadcast_bootstrap "\$@"
 EOF
     } > "$BS/bootstrap.sh"
@@ -318,22 +323,95 @@ test_writes_a_private_install_log() {
 }
 
 # --- Interactive install ---------------------------------------------------
+# The bootstrap asks every question itself and the installer always gets
+# /dev/null: under Ubuntu 26.04's sudo-rs a child that reads the terminal is
+# stopped by job control, which hung the install at its first prompt.
 
-test_interactive_install_hands_the_installer_the_terminal() {
-    local rc=0
-    bs_run MOCK_TTY="$BS/tty" >/dev/null || rc=$?
+test_interactive_install_asks_in_the_bootstrap_not_the_installer() {
+    local output rc=0
+    output=$(bs_run MOCK_TTY="$BS/tty") || rc=$?
 
     assert_equals "0" "$rc" "an interactive install exits 0"
-    assert_called "broadcast.sh install stdin=TTY-ANSWER" "the installer's prompts must read the terminal"
-    assert_not_called "broadcast.sh validate_license" "with no key yet, the installer's own prompt validates it"
+    assert_contains "$output" "enter the domain name" "the domain must be asked"
+    assert_contains "$output" "enter your license key" "the key must be asked"
+    assert_equals "mail.example.com" "$(cat "$BS/opt/broadcast/.domain")" "the typed domain must be stored"
+    assert_equals "KEY-1" "$(cat "$BS/opt/broadcast/.license")" "the typed key must be stored"
+    assert_called "broadcast.sh validate_license stdin=EOF" "validation must not read the terminal"
+    assert_called "broadcast.sh install stdin=EOF" "the installer must never read the terminal"
 }
 
-test_a_key_from_the_environment_is_validated_with_the_terminal_attached() {
-    # Domain unknown: validate_license goes through broadcast.sh, which asks
-    # for the domain first — on the terminal, not the pipe.
-    bs_run MOCK_TTY="$BS/tty" BROADCAST_LICENSE=KEY-1 >/dev/null
+test_interactive_asks_only_for_what_is_missing() {
+    printf 'mail.example.com\ny\n\n' > "$BS/tty"
+    local output rc=0
+    output=$(bs_run MOCK_TTY="$BS/tty" BROADCAST_LICENSE=ENV-KEY) || rc=$?
 
-    assert_called "broadcast.sh validate_license stdin=TTY-ANSWER" "the domain prompt must read the terminal"
+    assert_equals "0" "$rc" "a key from the environment plus a typed domain must install"
+    if echo "$output" | /usr/bin/grep -q "enter your license key"; then
+        echo "Assertion failed: the key was asked although BROADCAST_LICENSE was set"
+        TEST_FAILED=true
+    fi
+    assert_equals "ENV-KEY" "$(cat "$BS/opt/broadcast/.license")" "the environment key must be used"
+}
+
+test_interactive_re_asks_an_invalid_domain() {
+    printf 'not-a-domain\nmail.example.com\nKEY-1\ny\n\n' > "$BS/tty"
+    local output rc=0
+    output=$(bs_run MOCK_TTY="$BS/tty") || rc=$?
+
+    assert_equals "0" "$rc" "a corrected domain must install"
+    assert_contains "$output" "not a valid domain" "the invalid answer must be refused"
+    assert_equals "mail.example.com" "$(cat "$BS/opt/broadcast/.domain")" "the corrected domain must be stored"
+}
+
+test_interactive_re_asks_a_rejected_key_before_changing_anything() {
+    printf 'mail.example.com\nWRONG-KEY\nKEY-1\ny\n\n' > "$BS/tty"
+    touch "$BS/reject-once"
+    local output rc=0
+    output=$(bs_run MOCK_TTY="$BS/tty") || rc=$?
+
+    assert_equals "0" "$rc" "a corrected key must install"
+    assert_contains "$output" "did not accept this key" "the rejection must be shown"
+    assert_equals "KEY-1" "$(cat "$BS/opt/broadcast/.license")" "the accepted key must be stored"
+}
+
+test_answering_no_cancels_with_nothing_changed() {
+    printf 'mail.example.com\nKEY-1\nn\n' > "$BS/tty"
+    local output rc=0
+    output=$(bs_run MOCK_TTY="$BS/tty") || rc=$?
+
+    assert_equals "1" "$rc" "answering no must stop"
+    assert_contains "$output" "Nothing was changed" "the cancellation must say so"
+    assert_not_called "git" "nothing may be fetched"
+    assert_file_not_exists "$BS/opt/broadcast" "nothing may be created"
+    assert_file_not_exists "$BS/install.log" "not even the log"
+}
+
+test_a_terminal_that_closes_mid_questions_changes_nothing() {
+    printf 'mail.example.com\n' > "$BS/tty"
+    local output rc=0
+    output=$(bs_run MOCK_TTY="$BS/tty") || rc=$?
+
+    assert_equals "2" "$rc" "running out of answers must stop with exit 2"
+    assert_not_called "git" "nothing may be fetched"
+    assert_file_not_exists "$BS/opt/broadcast" "nothing may be created"
+}
+
+test_non_interactive_rejected_key_stops_before_anything_changes() {
+    local output rc=0
+    output=$(bs_run MOCK_LICENSE_CODE=401 BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=BAD-KEY) || rc=$?
+
+    assert_equals "1" "$rc" "a rejected key must stop the install"
+    assert_contains "$output" "Nothing was changed" "the message must say nothing changed"
+    assert_not_called "git" "nothing may be fetched"
+    assert_file_not_exists "$BS/opt/broadcast" "nothing may be created"
+}
+
+test_an_unreachable_license_server_defers_to_the_installer() {
+    local rc=0
+    bs_run MOCK_LICENSE_CODE=000 BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=KEY-1 >/dev/null || rc=$?
+
+    assert_equals "0" "$rc" "a pre-check that cannot decide must not block the install"
+    assert_called "broadcast.sh validate_license" "the installer's own validation must still run"
 }
 
 # --- Options ---------------------------------------------------------------
@@ -526,8 +604,14 @@ run_bootstrap_tests() {
     run_test "test_license_rejection_stops_before_the_install_and_removes_the_key" test_license_rejection_stops_before_the_install_and_removes_the_key
     run_test "test_installer_failure_reports_the_log" test_installer_failure_reports_the_log
     run_test "test_writes_a_private_install_log" test_writes_a_private_install_log
-    run_test "test_interactive_install_hands_the_installer_the_terminal" test_interactive_install_hands_the_installer_the_terminal
-    run_test "test_a_key_from_the_environment_is_validated_with_the_terminal_attached" test_a_key_from_the_environment_is_validated_with_the_terminal_attached
+    run_test "test_interactive_install_asks_in_the_bootstrap_not_the_installer" test_interactive_install_asks_in_the_bootstrap_not_the_installer
+    run_test "test_interactive_asks_only_for_what_is_missing" test_interactive_asks_only_for_what_is_missing
+    run_test "test_interactive_re_asks_an_invalid_domain" test_interactive_re_asks_an_invalid_domain
+    run_test "test_interactive_re_asks_a_rejected_key_before_changing_anything" test_interactive_re_asks_a_rejected_key_before_changing_anything
+    run_test "test_answering_no_cancels_with_nothing_changed" test_answering_no_cancels_with_nothing_changed
+    run_test "test_a_terminal_that_closes_mid_questions_changes_nothing" test_a_terminal_that_closes_mid_questions_changes_nothing
+    run_test "test_non_interactive_rejected_key_stops_before_anything_changes" test_non_interactive_rejected_key_stops_before_anything_changes
+    run_test "test_an_unreachable_license_server_defers_to_the_installer" test_an_unreachable_license_server_defers_to_the_installer
     run_test "test_reboots_by_default_and_no_reboot_is_passed_through" test_reboots_by_default_and_no_reboot_is_passed_through
     run_test "test_ref_override_selects_the_branch" test_ref_override_selects_the_branch
     run_test "test_resumes_a_partial_checkout_without_deleting_it" test_resumes_a_partial_checkout_without_deleting_it

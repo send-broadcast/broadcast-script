@@ -12,11 +12,38 @@ This script installs the Broadcast script on a Linux server. It sets up the nece
 
 ## Usage
 
-Run the following commands as root:
+On a fresh server, run:
 
 ```bash
-rm -rf /opt/broadcast && git clone https://github.com/send-broadcast/broadcast-script.git /opt/broadcast && cd /opt/broadcast && chmod +x broadcast.sh && ./broadcast.sh install
+curl -fsSL https://sendbroadcast.net/install.sh | sudo bash
 ```
+
+The installer asks for the server's domain and your license key, checks the
+key, installs Broadcast into `/opt/broadcast`, and reboots the server one
+minute after it finishes. During that minute, only root can log in.
+
+Without a terminal (an automation agent, or `ssh host 'command'`), give the
+answers as environment variables:
+
+```bash
+curl -fsSL https://sendbroadcast.net/install.sh | \
+  sudo BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=XXXXX-XXXXX-XXXXX-XX bash
+```
+
+Add `-s -- --no-reboot` after `bash` (or set `BROADCAST_NO_REBOOT=1`) to skip
+the reboot. The installer writes a log to `/var/log/broadcast-install.log`.
+
+| Exit code | Meaning |
+|-----------|---------|
+| 0 | Installed |
+| 1 | Error (see the message and the log) |
+| 2 | No terminal, and `BROADCAST_DOMAIN` / `BROADCAST_LICENSE` are not set; nothing changed |
+| 3 | Broadcast is already installed on this server; nothing changed |
+
+The installer never deletes `/opt/broadcast`. On a server that already runs
+Broadcast it stops without changes; use `./broadcast.sh update` or
+`./broadcast.sh upgrade` there instead. If an earlier install attempt stopped
+before it created any data, running the installer again continues it.
 
 ## Commands
 
@@ -36,7 +63,7 @@ cd /opt/broadcast && ./broadcast.sh <command>
 
 ### Installing and updating
 
-- **`install`** — Install Broadcast onto a fresh Ubuntu server: creates the `broadcast` user, configures the firewall (ports 22/80/443), fail2ban, swap, automatic security updates, Docker, the systemd service, and monitoring cron jobs. Reboots the server when finished.
+- **`install`** — Install Broadcast onto a fresh Ubuntu server: creates the `broadcast` user, configures the firewall (ports 22/80/443), fail2ban, swap, automatic security updates, Docker, the systemd service, and monitoring cron jobs. Safe to run again: cron jobs are added once. Schedules a reboot one minute after it finishes (`BROADCAST_NO_REBOOT=1` skips it).
 - **`update`** — Update these management scripts to the latest version (`git pull`). Runs automatically once a day via cron.
 - **`upgrade [version]`** — Upgrade Broadcast itself: updates the scripts, pulls new Docker images, and restarts the system. With no version it upgrades to the latest release; pass a version (e.g. `upgrade 1.2.3`) to pin a specific one.
 - **`upgrade edge`** — **Developers only.** Install the unreleased build of the current `main` branch instead of a release. A new `edge` image is published automatically on every change to `main` (for both amd64 and arm64), replacing the previous one; re-run `upgrade edge` any time to pull the newest. The app shows which build is running next to its version, e.g. `2.31.1 (edge-cb53118 2026-08-18)`. Edge builds may contain database migrations that are in no release, and migrations do not roll back — once a server has run edge, going back to a release against the same database is not supported. Use it on development or throwaway servers only, never on a production install; the command asks you to confirm this, and automated (cron-driven) upgrades refuse the tag unless the host has opted in.

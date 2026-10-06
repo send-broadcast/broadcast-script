@@ -42,6 +42,7 @@ SYSTEMD_UNIT="/etc/systemd/system/broadcast.service"
 OS_RELEASE_FILE="/etc/os-release"
 MEMINFO_FILE="/proc/meminfo"
 TTY_DEVICE="/dev/tty"
+LICENSE_CHECK_URL="https://sendbroadcast.net/license/check"
 
 SUPPORTED_UBUNTU="24.04 26.04"
 MIN_MEMORY_MB=1800      # a "2 GB" server reports a little under 2048 MB
@@ -183,11 +184,19 @@ bs_check_existing() {
 }
 
 # Works out where the domain and license come from, before anything changes.
-# Sets BS_STDIN to the terminal (the installer prompts there) or /dev/null
-# (everything is already answered).
+# Sets BS_ASK when something must be asked on the terminal.
+#
+# All questions are asked by THIS shell, before anything changes and before
+# the log starts; the installer then runs with stdin from /dev/null. Ubuntu
+# 26.04's sudo-rs runs `curl ... | sudo bash` on its own pty, and on it a
+# child process that reads the terminal (or a tee writing to it while this
+# shell reads) is stopped by job control and the install hangs at the first
+# prompt. Only the top-level shell can read the terminal safely there.
 bs_resolve_inputs() {
   BS_DOMAIN="${BROADCAST_DOMAIN:-}"
   BS_LICENSE="${BROADCAST_LICENSE:-}"
+  BS_LICENSE_FROM_ENV=""
+  [ -n "$BS_LICENSE" ] && BS_LICENSE_FROM_ENV=1
 
   if [ -n "$BS_DOMAIN" ] && ! bs_valid_domain "$BS_DOMAIN"; then
     bs_error "BROADCAST_DOMAIN='$BS_DOMAIN' is not a valid domain name (example: mail.example.com)."
@@ -198,22 +207,128 @@ bs_resolve_inputs() {
     exit $EXIT_ERROR
   fi
 
-  local have_domain="" have_license=""
-  if [ -n "$BS_DOMAIN" ] || { [ "$BS_MODE" = "resume" ] && [ -s "$BROADCAST_DIR/.domain" ]; }; then have_domain=1; fi
-  if [ -n "$BS_LICENSE" ] || { [ "$BS_MODE" = "resume" ] && [ -s "$BROADCAST_DIR/.license" ]; }; then have_license=1; fi
+  # A resumed attempt may already hold answers from its own prompts
+  if [ "$BS_MODE" = "resume" ]; then
+    [ -z "$BS_DOMAIN" ] && [ -s "$BROADCAST_DIR/.domain" ] && BS_DOMAIN=$(cat "$BROADCAST_DIR/.domain")
+    [ -z "$BS_LICENSE" ] && [ -s "$BROADCAST_DIR/.license" ] && BS_LICENSE=$(cat "$BROADCAST_DIR/.license")
+  fi
 
-  if [ -n "$have_domain" ] && [ -n "$have_license" ]; then
-    BS_STDIN="/dev/null"
-  elif bs_has_tty; then
-    BS_STDIN="$TTY_DEVICE"
-  else
-    bs_error "there is no terminal to ask for the domain and license key."
-    echo "Nothing was changed. Pass both as environment variables instead:" >&2
-    echo >&2
-    echo "  curl -fsSL https://sendbroadcast.net/install.sh | sudo BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=XXXXX-XXXXX-XXXXX-XX bash" >&2
-    echo >&2
-    echo "Or connect with a terminal (ssh -t) and run the installer again." >&2
+  BS_ASK=""
+  if [ -n "$BS_DOMAIN" ] && [ -n "$BS_LICENSE" ]; then
+    return 0
+  fi
+  if bs_has_tty; then
+    BS_ASK=1
+    return 0
+  fi
+  bs_error "there is no terminal to ask for the domain and license key."
+  echo "Nothing was changed. Pass both as environment variables instead:" >&2
+  echo >&2
+  echo "  curl -fsSL https://sendbroadcast.net/install.sh | sudo BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=XXXXX-XXXXX-XXXXX-XX bash" >&2
+  echo >&2
+  echo "Or connect with a terminal (ssh -t) and run the installer again." >&2
+  exit $EXIT_NO_INPUT
+}
+
+# Asks the license server whether the key is valid for the domain, before
+# anything changes. 0 = accepted, 1 = rejected, 2 = could not tell (no curl,
+# network error, unexpected answer); the installer's own validation decides
+# in that case.
+bs_check_key() {
+  command -v curl >/dev/null 2>&1 || return 2
+  local code
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
+    -H "Content-Type: application/json" \
+    -d "{\"key\":\"$2\", \"domain\":\"$1\"}" "$LICENSE_CHECK_URL" 2>/dev/null) || code="000"
+  case "$code" in
+    200) return 0 ;;
+    401) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+# Reads one answer from the terminal (fd 3). A closed terminal ends the run.
+bs_ask() {
+  printf '\033[32m%s\033[0m ' "$1"
+  if ! IFS= read -r -u 3 BS_ANSWER; then
+    echo
+    bs_error "the terminal closed before the questions were answered. Nothing was changed."
     exit $EXIT_NO_INPUT
+  fi
+  BS_ANSWER="${BS_ANSWER//[[:space:]]/}"
+}
+
+bs_ask_inputs() {
+  [ -n "$BS_ASK" ] || return 0
+  exec 3< "$TTY_DEVICE"
+
+  while [ -z "$BS_DOMAIN" ]; do
+    bs_ask "Please enter the domain name for this server (eg. broadcast.example.com):"
+    if bs_valid_domain "$BS_ANSWER"; then
+      BS_DOMAIN="$BS_ANSWER"
+    else
+      echo -e "\033[31m'$BS_ANSWER' is not a valid domain name. Please try again.\033[0m"
+    fi
+  done
+
+  local status
+  while true; do
+    while [ -z "$BS_LICENSE" ]; do
+      bs_ask "Please enter your license key:"
+      if [ -n "$BS_ANSWER" ] && bs_valid_license "$BS_ANSWER"; then
+        BS_LICENSE="$BS_ANSWER"
+      else
+        echo -e "\033[31mThat does not look like a license key. Copy it from https://sendbroadcast.net/dashboard\033[0m"
+      fi
+    done
+    status=0
+    bs_check_key "$BS_DOMAIN" "$BS_LICENSE" || status=$?
+    if [ "$status" -ne 1 ]; then
+      break
+    fi
+    echo -e "\033[31mThe license server did not accept this key for $BS_DOMAIN. Please check the key and try again.\033[0m"
+    if [ -n "$BS_LICENSE_FROM_ENV" ]; then
+      exec 3<&-
+      bs_error "BROADCAST_LICENSE was rejected. Nothing was changed."
+      exit $EXIT_ERROR
+    fi
+    BS_LICENSE=""
+  done
+  BS_KEY_CHECKED=1
+
+  echo
+  bs_ask "Install Broadcast for [$BS_DOMAIN] with license key [$BS_LICENSE]? [y/n]"
+  case "$BS_ANSWER" in
+    [Yy]|[Yy][Ee][Ss]) ;;
+    *)
+      exec 3<&-
+      echo "Installation cancelled. Nothing was changed."
+      exit $EXIT_ERROR
+      ;;
+  esac
+
+  echo
+  echo -e "\033[33mPoint the DNS A record of $BS_DOMAIN to this server's IP address before you continue.\033[0m"
+  echo -e "\033[33mBroadcast requests its TLS certificate for that name as soon as it starts.\033[0m"
+  echo -e "\033[33mInstructions: https://sendbroadcast.net/docs/installation\033[0m"
+  bs_ask "Press Enter to continue..."
+  exec 3<&-
+}
+
+# Non-interactive runs get the same early answer: a rejected key stops here,
+# before anything is downloaded or changed.
+bs_precheck_key() {
+  [ -z "${BS_KEY_CHECKED:-}" ] || return 0
+  local status=0
+  bs_check_key "$BS_DOMAIN" "$BS_LICENSE" || status=$?
+  if [ "$status" -eq 1 ]; then
+    bs_error "the license server did not accept this license key for $BS_DOMAIN. Nothing was changed."
+    echo "Check the key and the domain on https://sendbroadcast.net/dashboard, then run the installer again." >&2
+    exit $EXIT_ERROR
+  fi
+  if [ "$status" -eq 0 ]; then
+    echo
+    echo "Point the DNS A record of $BS_DOMAIN to this server's IP address; Broadcast requests its TLS certificate for that name as soon as it starts."
   fi
 }
 
@@ -314,13 +429,12 @@ bs_write_answers() {
   fi
 }
 
-# Checks the key with the license server before any apt or Docker work, so a
-# typo fails in seconds instead of after a long install. Without a key yet,
-# the installer's own prompt validates it the same way.
+# The installer's own validation, which also stores the registry credentials.
+# Runs before any apt or Docker work.
 bs_validate_license() {
   [ -s "$BROADCAST_DIR/.license" ] || return 0
   bs_info "Checking the license key..."
-  if ! (cd "$BROADCAST_DIR" && ./broadcast.sh validate_license < "$BS_STDIN"); then
+  if ! (cd "$BROADCAST_DIR" && ./broadcast.sh validate_license < /dev/null); then
     rm -f "$BROADCAST_DIR/.license"
     BS_HINTED=1
     bs_error "the license key was not accepted for $(cat "$BROADCAST_DIR/.domain" 2>/dev/null). Nothing was installed."
@@ -332,7 +446,7 @@ bs_validate_license() {
 bs_run_installer() {
   bs_info "Running the Broadcast installer..."
   local rc=0
-  (cd "$BROADCAST_DIR" && BROADCAST_NO_REBOOT="$BS_NO_REBOOT" ./broadcast.sh install < "$BS_STDIN") || rc=$?
+  (cd "$BROADCAST_DIR" && BROADCAST_NO_REBOOT="$BS_NO_REBOOT" ./broadcast.sh install < /dev/null) || rc=$?
   if [ "$rc" -ne 0 ]; then
     BS_HINTED=1
     echo
@@ -366,6 +480,8 @@ broadcast_bootstrap() {
   bs_check_arch
   bs_resolve_inputs
   bs_check_resources
+  bs_ask_inputs
+  bs_precheck_key
 
   bs_start_log
   bs_ensure_packages
