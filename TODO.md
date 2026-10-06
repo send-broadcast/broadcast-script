@@ -71,10 +71,13 @@ sendbroadcast.net/install.sh will 302 to the raw `install.sh` in this repo.
       interactive, legacy-upgrade) on 24.04 + 26.04
 - [x] Upgrade check: legacy main install -> branch upgrade, CLI upgrade,
       dashboard-trigger upgrade (30/30 on both releases, first run)
-- [ ] E2E on fresh Ubuntu 24.04 VMs (Vagrant+QEMU) from the branch raw URL:
-      (a) interactive TTY, (b) non-interactive env vars over ssh,
-      (c) re-run on installed server refuses and changes nothing,
-      (d) no TTY + no env vars fails fast
+- [x] E2E on fresh Ubuntu 24.04 AND 26.04 VMs (Vagrant+QEMU, arm64) from the
+      branch raw URL (sha256 6e8401a3111b, commit 8e118bc), 2026-10-06:
+      interactive 12/12 + 12/12, noninteractive 34/34 + 34/34,
+      legacy-upgrade 30/30 + 30/30. (a) TTY with a rejected domain and key,
+      (b) ssh -T env vars, exit 0, reboot scheduled and observed,
+      (c) re-run exit 3 with unchanged fingerprint (TTY and no-TTY),
+      (d) exit 2 in 0s with nothing written. amd64 not run (no x86 HVF here).
 - [x] CHANGELOG, README
 - [ ] Ask Simon before push/merge; report to send-broadcast-6b
 
