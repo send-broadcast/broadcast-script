@@ -304,6 +304,17 @@ test_fix_generates_missing_encryption_keys() {
     assert_equals "3" "$count" "missing encryption keys must be generated"
 }
 
+test_fix_fills_empty_encryption_keys() {
+    echo "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=" >> "$SANDBOX_ROOT/app/.env"
+
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+
+    assert_equals "1" "$(/usr/bin/grep -cE "^ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=[0-9a-f]{32}$" "$SANDBOX_ROOT/app/.env")" \
+        "an empty encryption key must get a value"
+    assert_equals "3" "$(/usr/bin/grep -c "ACTIVE_RECORD_ENCRYPTION" "$SANDBOX_ROOT/app/.env")" \
+        "all three keys, no duplicates"
+}
+
 test_fix_fails_on_missing_docker_prerequisite() {
     local output rc=0
     output=$(sandbox_run '
@@ -606,6 +617,7 @@ run_fix_tests() {
     run_test "test_fix_adds_missing_cron_entries_once" test_fix_adds_missing_cron_entries_once
     run_test "test_fix_preserves_existing_cron_entries" test_fix_preserves_existing_cron_entries
     run_test "test_fix_generates_missing_encryption_keys" test_fix_generates_missing_encryption_keys
+    run_test "test_fix_fills_empty_encryption_keys" test_fix_fills_empty_encryption_keys
     run_test "test_fix_fails_on_missing_docker_prerequisite" test_fix_fails_on_missing_docker_prerequisite
     run_test "test_fix_installs_inotify_tools_when_missing" test_fix_installs_inotify_tools_when_missing
     run_test "test_fix_regenerates_missing_image_file" test_fix_regenerates_missing_image_file

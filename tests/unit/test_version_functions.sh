@@ -162,11 +162,74 @@ test_generate_encryption_keys_is_idempotent() {
     assert_equals "$original" "$current" "existing keys must not be regenerated"
 }
 
+# An app/.env copied from the manual sample can carry a key name with an empty
+# value. The app uses the env keys only when all three have a value, so no
+# data was encrypted with them yet: filling the empty ones is safe.
+test_generate_encryption_keys_fills_empty_values() {
+    cat > "$SANDBOX_ROOT/app/.env" <<'ENV'
+ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=
+ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=
+ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT=
+ENV
+    sandbox_run "generate_encryption_keys" >/dev/null
+
+    local name
+    for name in PRIMARY_KEY DETERMINISTIC_KEY KEY_DERIVATION_SALT; do
+        assert_equals "1" "$(/usr/bin/grep -cE "^ACTIVE_RECORD_ENCRYPTION_${name}=[0-9a-f]{32}$" "$SANDBOX_ROOT/app/.env")" \
+            "$name should get one generated value"
+    done
+    assert_equals "3" "$(/usr/bin/grep -c "ACTIVE_RECORD_ENCRYPTION" "$SANDBOX_ROOT/app/.env")" \
+        "no empty duplicate lines should remain"
+}
+
+# A key with a value is never regenerated: data may be encrypted with it.
+test_generate_encryption_keys_keeps_set_values_and_adds_only_missing() {
+    cat > "$SANDBOX_ROOT/app/.env" <<'ENV'
+ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=keep-this-primary
+ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=
+ENV
+    sandbox_run "generate_encryption_keys" >/dev/null
+
+    local content
+    content=$(cat "$SANDBOX_ROOT/app/.env")
+    assert_contains "$content" "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=keep-this-primary" "a set key must survive"
+    assert_equals "1" "$(/usr/bin/grep -c "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY" "$SANDBOX_ROOT/app/.env")" \
+        "a set key must not be duplicated"
+    assert_equals "1" "$(/usr/bin/grep -cE "^ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=[0-9a-f]{32}$" "$SANDBOX_ROOT/app/.env")" \
+        "an empty key gets a value"
+    assert_equals "1" "$(/usr/bin/grep -cE "^ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT=[0-9a-f]{32}$" "$SANDBOX_ROOT/app/.env")" \
+        "an absent key gets a value"
+}
+
 test_generate_encryption_keys_fails_without_app_env() {
     rm -f "$SANDBOX_ROOT/app/.env"
     local rc=0
     sandbox_run "generate_encryption_keys" >/dev/null || rc=$?
     assert_equals "1" "$rc" "missing app/.env should fail"
+}
+
+# /license/check answers 401 both for a wrong key and for a valid key that
+# is already used on every server it allows; the second carries a reason.
+test_validate_license_names_a_server_limit() {
+    echo "mail.example.com" > "$SANDBOX_ROOT/.domain"
+    echo "KEY-1" > "$SANDBOX_ROOT/.license"
+    local output rc=0
+    output=$(sandbox_run "validate_license" \
+        "export CURL_MOCK_HTTP_CODE=401 CURL_MOCK_BODY='{\"error\":\"server_limit_reached\",\"servers_total\":3,\"servers_used\":3}'") || rc=$?
+
+    assert_equals "1" "$rc" "a key at its limit must fail validation"
+    assert_contains "$output" "already used on every server it allows (3 of 3)" "the limit must be named"
+    assert_contains "$output" "https://sendbroadcast.net/dashboard" "the operator must learn where to free a server"
+}
+
+test_validate_license_calls_a_bare_401_an_invalid_key() {
+    echo "mail.example.com" > "$SANDBOX_ROOT/.domain"
+    echo "KEY-1" > "$SANDBOX_ROOT/.license"
+    local output rc=0
+    output=$(sandbox_run "validate_license" "export CURL_MOCK_HTTP_CODE=401") || rc=$?
+
+    assert_equals "1" "$rc" "a rejected key must fail validation"
+    assert_contains "$output" "Invalid license key" "a bare 401 is a wrong key"
 }
 
 run_version_function_tests() {
@@ -190,6 +253,10 @@ run_version_function_tests() {
     run_test "test_set_docker_image_defaults_to_latest" test_set_docker_image_defaults_to_latest
     run_test "test_generate_encryption_keys_adds_all_three_keys" test_generate_encryption_keys_adds_all_three_keys
     run_test "test_generate_encryption_keys_is_idempotent" test_generate_encryption_keys_is_idempotent
+    run_test "test_generate_encryption_keys_fills_empty_values" test_generate_encryption_keys_fills_empty_values
+    run_test "test_generate_encryption_keys_keeps_set_values_and_adds_only_missing" test_generate_encryption_keys_keeps_set_values_and_adds_only_missing
+    run_test "test_validate_license_names_a_server_limit" test_validate_license_names_a_server_limit
+    run_test "test_validate_license_calls_a_bare_401_an_invalid_key" test_validate_license_calls_a_bare_401_an_invalid_key
     run_test "test_generate_encryption_keys_fails_without_app_env" test_generate_encryption_keys_fails_without_app_env
 
     local result

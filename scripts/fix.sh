@@ -343,7 +343,7 @@ LOGROTATE
   if [ ! -f /opt/broadcast/app/.env ]; then
     fix_fail "app/.env is missing — the Rails environment was never created; run ./broadcast.sh install"
   else
-    if grep -q "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY" /opt/broadcast/app/.env; then
+    if [ -z "$(encryption_keys_missing /opt/broadcast/app/.env)" ]; then
       fix_ok "Active Record encryption keys present"
     else
       generate_encryption_keys > /dev/null

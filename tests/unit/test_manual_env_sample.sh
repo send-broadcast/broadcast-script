@@ -48,12 +48,26 @@ test_sample_explains_how_to_generate_keys() {
     assert_contains "$content" "Never change" "sample warns not to change the keys after first start"
 }
 
+# A placeholder value (e.g. "replace-with-...") is a non-empty string, so the
+# app would accept it as a real key and encrypt data with a value that is
+# public. Leaving the values empty makes the app log its "not configured"
+# warning until the operator generates real keys.
+test_sample_encryption_values_are_empty() {
+    local v line nonempty=""
+    for v in $(install_encryption_variables); do
+        line=$(grep -E "^${v}=" "$APP_SAMPLE")
+        [[ "$line" == "${v}=" ]] || nonempty="$nonempty $v"
+    done
+    assert_equals "" "$nonempty" "encryption variables with a value in manual/app/.env.sample"
+}
+
 run_manual_env_sample_tests() {
     init_test_framework
 
     run_test "test_search_finds_install_encryption_variables" test_search_finds_install_encryption_variables
     run_test "test_sample_has_every_encryption_variable" test_sample_has_every_encryption_variable
     run_test "test_sample_explains_how_to_generate_keys" test_sample_explains_how_to_generate_keys
+    run_test "test_sample_encryption_values_are_empty" test_sample_encryption_values_are_empty
 
     local result
     print_test_summary

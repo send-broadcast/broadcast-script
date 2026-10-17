@@ -187,12 +187,11 @@ function _upgrade_continue() {
     (crontab -l 2>/dev/null || true; echo "* * * * * /opt/broadcast/broadcast.sh recover >> /opt/broadcast/logs/cron/recover.log 2>&1") | crontab -
   fi
 
-  # Add Active Record encryption keys if missing (required for encrypted fields like API keys)
-  if ! grep -q "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY" /opt/broadcast/app/.env 2>/dev/null; then
+  # Add Active Record encryption keys that are missing or empty (required for
+  # encrypted fields like API keys). Keys that have a value are never changed.
+  if [ -f /opt/broadcast/app/.env ] && [ -n "$(encryption_keys_missing /opt/broadcast/app/.env)" ]; then
     echo -e "\e[33mAdding Active Record encryption keys...\e[0m"
-    echo "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=$(openssl rand -hex 16)" >> /opt/broadcast/app/.env
-    echo "ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=$(openssl rand -hex 16)" >> /opt/broadcast/app/.env
-    echo "ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT=$(openssl rand -hex 16)" >> /opt/broadcast/app/.env
+    generate_encryption_keys > /dev/null
     echo -e "\e[32mActive Record encryption keys added.\e[0m"
   fi
 

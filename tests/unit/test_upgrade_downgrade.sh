@@ -143,6 +143,17 @@ test_upgrade_continue_adds_encryption_keys_when_missing() {
     assert_equals "3" "$count" "all three encryption keys should be added"
 }
 
+test_upgrade_continue_fills_empty_encryption_keys() {
+    echo "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=" >> "$SANDBOX_ROOT/app/.env"
+
+    sandbox_run "_upgrade_continue 2.5.0" >/dev/null
+
+    assert_equals "1" "$(/usr/bin/grep -cE "^ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=[0-9a-f]{32}$" "$SANDBOX_ROOT/app/.env")" \
+        "an empty encryption key must get a value"
+    assert_equals "3" "$(/usr/bin/grep -c "ACTIVE_RECORD_ENCRYPTION" "$SANDBOX_ROOT/app/.env")" \
+        "all three keys, no duplicates"
+}
+
 test_upgrade_continue_preserves_existing_encryption_keys() {
     cat >> "$SANDBOX_ROOT/app/.env" <<'ENV'
 ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=preexisting-primary
@@ -391,6 +402,7 @@ run_upgrade_downgrade_tests() {
     run_test "test_upgrade_continue_installs_logs_watcher_when_not_enabled" test_upgrade_continue_installs_logs_watcher_when_not_enabled
     run_test "test_upgrade_continue_restarts_logs_watcher_to_pick_up_new_scripts" test_upgrade_continue_restarts_logs_watcher_to_pick_up_new_scripts
     run_test "test_upgrade_continue_adds_encryption_keys_when_missing" test_upgrade_continue_adds_encryption_keys_when_missing
+    run_test "test_upgrade_continue_fills_empty_encryption_keys" test_upgrade_continue_fills_empty_encryption_keys
     run_test "test_upgrade_continue_preserves_existing_encryption_keys" test_upgrade_continue_preserves_existing_encryption_keys
     run_test "test_upgrade_continue_adds_health_cron_for_older_installs" test_upgrade_continue_adds_health_cron_for_older_installs
     run_test "test_upgrade_continue_adds_recover_cron_for_older_installs" test_upgrade_continue_adds_recover_cron_for_older_installs

@@ -232,19 +232,43 @@ bs_resolve_inputs() {
 
 # Asks the license server whether the key is valid for the domain, before
 # anything changes. 0 = accepted, 1 = rejected, 2 = could not tell (no curl,
-# network error, unexpected answer); the installer's own validation decides
-# in that case.
+# network error, unexpected answer; the installer's own validation decides
+# in that case), 3 = a valid key already used on every server it allows.
+# The server sends 401 for both refusals; the server-limit 401 carries
+# {"error":"server_limit_reached","servers_total":N,"servers_used":N}, and
+# BS_KEY_LIMIT gets "N of N" from it (empty when the counts are missing).
 bs_check_key() {
+  BS_KEY_LIMIT=""
   command -v curl >/dev/null 2>&1 || return 2
-  local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 -X POST \
+  local out code body=""
+  out=$(curl -s -w '\n%{http_code}' --max-time 30 -X POST \
     -H "Content-Type: application/json" \
-    -d "{\"key\":\"$2\", \"domain\":\"$1\"}" "$LICENSE_CHECK_URL" 2>/dev/null) || code="000"
+    -d "{\"key\":\"$2\", \"domain\":\"$1\"}" "$LICENSE_CHECK_URL" 2>/dev/null) || out="000"
+  code="${out##*$'\n'}"
+  [[ "$out" == *$'\n'* ]] && body="${out%$'\n'*}"
   case "$code" in
     200) return 0 ;;
-    401) return 1 ;;
+    401)
+      if [[ "$body" == *'"error":"server_limit_reached"'* ]]; then
+        if [[ "$body" =~ \"servers_used\":([0-9]+) ]]; then
+          BS_KEY_LIMIT="${BASH_REMATCH[1]}"
+          if [[ "$body" =~ \"servers_total\":([0-9]+) ]]; then
+            BS_KEY_LIMIT="$BS_KEY_LIMIT of ${BASH_REMATCH[1]}"
+          else
+            BS_KEY_LIMIT=""
+          fi
+        fi
+        return 3
+      fi
+      return 1
+      ;;
     *) return 2 ;;
   esac
+}
+
+# "already used on every server it allows (2 of 2)", for the messages below
+bs_limit_text() {
+  echo "already used on every server it allows${BS_KEY_LIMIT:+ ($BS_KEY_LIMIT)}"
 }
 
 # Reads one answer from the terminal (fd 3). A closed terminal ends the run.
@@ -283,13 +307,21 @@ bs_ask_inputs() {
     done
     status=0
     bs_check_key "$BS_DOMAIN" "$BS_LICENSE" || status=$?
-    if [ "$status" -ne 1 ]; then
+    if [ "$status" -ne 1 ] && [ "$status" -ne 3 ]; then
       break
     fi
-    echo -e "\033[31mThe license server did not accept this key for $BS_DOMAIN. Please check the key and try again.\033[0m"
+    if [ "$status" -eq 3 ]; then
+      echo -e "\033[31mThis license key is $(bs_limit_text). Remove a server from it on https://sendbroadcast.net/dashboard, or enter another key.\033[0m"
+    else
+      echo -e "\033[31mThe license server did not accept this key for $BS_DOMAIN. Please check the key and try again.\033[0m"
+    fi
     if [ -n "$BS_LICENSE_FROM_ENV" ]; then
       exec 3<&-
-      bs_error "BROADCAST_LICENSE was rejected. Nothing was changed."
+      if [ "$status" -eq 3 ]; then
+        bs_error "BROADCAST_LICENSE is $(bs_limit_text). Nothing was changed."
+      else
+        bs_error "BROADCAST_LICENSE was rejected. Nothing was changed."
+      fi
       exit $EXIT_ERROR
     fi
     BS_LICENSE=""
@@ -324,6 +356,11 @@ bs_precheck_key() {
   if [ "$status" -eq 1 ]; then
     bs_error "the license server did not accept this license key for $BS_DOMAIN. Nothing was changed."
     echo "Check the key and the domain on https://sendbroadcast.net/dashboard, then run the installer again." >&2
+    exit $EXIT_ERROR
+  fi
+  if [ "$status" -eq 3 ]; then
+    bs_error "this license key is $(bs_limit_text). Nothing was changed."
+    echo "Remove a server from the license on https://sendbroadcast.net/dashboard, or use another key, then run the installer again." >&2
     exit $EXIT_ERROR
   fi
   if [ "$status" -eq 0 ]; then

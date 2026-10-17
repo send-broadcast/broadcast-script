@@ -209,8 +209,19 @@ validate_license() {
   response=$(cat "$tmpfile")
   rm -f "$tmpfile"
 
+  # A 401 is a wrong key, unless the body says the key is valid but already
+  # used on every server it allows (the license server adds that reason).
   if [ "$http_code" = "401" ]; then
-    echo -e "\e[31mInvalid license key. Aborted.\e[0m"
+    if echo "$response" | grep -q '"error":"server_limit_reached"'; then
+      local used total limit=""
+      used=$(echo "$response" | grep -oE '"servers_used":[0-9]+' | grep -oE '[0-9]+$' || true)
+      total=$(echo "$response" | grep -oE '"servers_total":[0-9]+' | grep -oE '[0-9]+$' || true)
+      [ -n "$used" ] && [ -n "$total" ] && limit=" ($used of $total)"
+      echo -e "\e[31mThis license key is already used on every server it allows$limit. Aborted.\e[0m"
+      echo -e "\e[33mRemove a server from the license on https://sendbroadcast.net/dashboard, or use another key.\e[0m"
+    else
+      echo -e "\e[31mInvalid license key. Aborted.\e[0m"
+    fi
     return 1
   fi
 
@@ -426,6 +437,23 @@ get_version_history() {
   fi
 }
 
+ENCRYPTION_KEY_NAMES="ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT"
+
+# Prints the encryption variables that app/.env does not set to a value: the
+# name is absent, or present with nothing after the "=" (the manual .env
+# sample ships them that way). Prints nothing when all three have a value.
+encryption_keys_missing() {
+  local app_env_file="${1:-/opt/broadcast/app/.env}"
+  local name
+  for name in $ENCRYPTION_KEY_NAMES; do
+    grep -qE "^${name}=.+" "$app_env_file" 2>/dev/null || echo "$name"
+  done
+}
+
+# Generates a value for each encryption variable that has none. A variable
+# that already has a value is never changed: data may be encrypted with it,
+# and a new key would make that data unreadable. Filling the others is safe,
+# because the app uses the env keys only when all three have a value.
 generate_encryption_keys() {
   local app_env_file="/opt/broadcast/app/.env"
 
@@ -434,16 +462,24 @@ generate_encryption_keys() {
     return 1
   fi
 
-  if grep -q "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY" "$app_env_file" 2>/dev/null; then
+  local missing
+  missing=$(encryption_keys_missing "$app_env_file")
+  if [ -z "$missing" ]; then
     echo -e "\e[32mActive Record encryption keys already exist in app/.env.\e[0m"
     echo -e "\e[33mTo regenerate, remove the existing keys from app/.env first.\e[0m"
     return 0
   fi
 
   echo -e "\e[33mGenerating Active Record encryption keys...\e[0m"
-  echo "ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY=$(openssl rand -hex 16)" >> "$app_env_file"
-  echo "ACTIVE_RECORD_ENCRYPTION_DETERMINISTIC_KEY=$(openssl rand -hex 16)" >> "$app_env_file"
-  echo "ACTIVE_RECORD_ENCRYPTION_KEY_DERIVATION_SALT=$(openssl rand -hex 16)" >> "$app_env_file"
+  local name
+  for name in $missing; do
+    # Drop an empty "NAME=" line so the new value is the only one. cat > keeps
+    # the file's owner and mode.
+    awk -v empty="${name}=" '$0 != empty' "$app_env_file" > "$app_env_file.tmp"
+    cat "$app_env_file.tmp" > "$app_env_file"
+    rm -f "$app_env_file.tmp"
+    echo "${name}=$(openssl rand -hex 16)" >> "$app_env_file"
+  done
 
   chown broadcast:broadcast "$app_env_file"
 

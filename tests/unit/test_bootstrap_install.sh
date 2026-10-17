@@ -59,10 +59,13 @@ EOF
     bs_mock uname 'echo "${MOCK_ARCH:-x86_64}"'
     bs_mock df 'echo "Filesystem 1024-blocks Used Available Capacity Mounted"; echo "/dev/sda1 41000000 1000000 ${MOCK_DF_FREE_KB:-40000000} 3% /"'
     bs_mock ss 'printf "%s" "${MOCK_SS:-}"'
-    # curl: the license pre-check prints an HTTP status. MOCK_LICENSE_CODE
-    # sets it; a "reject-once" file makes the first answer 401.
-    bs_mock curl 'if [ -f "'"$BS"'/reject-once" ]; then rm -f "'"$BS"'/reject-once"; printf 401; exit 0; fi
-printf "%s" "${MOCK_LICENSE_CODE:-200}"'
+    # curl: the license pre-check prints the body, a newline, then the HTTP
+    # status (-w '\n%{http_code}'). MOCK_LICENSE_CODE sets the status and
+    # MOCK_LICENSE_BODY the body. A "reject-once" file makes the first answer
+    # a bare 401; a "limit-once" file makes it the server-limit 401.
+    bs_mock curl 'if [ -f "'"$BS"'/reject-once" ]; then rm -f "'"$BS"'/reject-once"; printf "\n401"; exit 0; fi
+if [ -f "'"$BS"'/limit-once" ]; then rm -f "'"$BS"'/limit-once"; printf "%s\n401" "{\"error\":\"server_limit_reached\",\"servers_total\":1,\"servers_used\":1}"; exit 0; fi
+printf "%s\n%s" "${MOCK_LICENSE_BODY:-}" "${MOCK_LICENSE_CODE:-200}"'
     bs_mock jq 'exit 0'
     bs_mock apt-get 'echo "apt-get-env DEBIAN_FRONTEND=${DEBIAN_FRONTEND:-}" >> "'"$BS_CALLS"'"
 case " $* " in *" git"*) cp "'"$BS"'/git-mock" "'"$BS"'/bin/git" ;; esac
@@ -148,6 +151,16 @@ assert_not_called() {
         TEST_FAILED=true
         return 1
     fi
+}
+
+assert_not_contains() {
+    if [[ "$1" == *"$2"* ]]; then
+        echo -e "${RED}Assertion failed: output contains '$2'${NC}"
+        [ -n "${3:-}" ] && echo -e "${RED}Message: $3${NC}"
+        TEST_FAILED=true
+        return 1
+    fi
+    return 0
 }
 
 # Every path and its size, so "nothing was changed" can be compared exactly.
@@ -406,6 +419,44 @@ test_non_interactive_rejected_key_stops_before_anything_changes() {
     assert_file_not_exists "$BS/opt/broadcast" "nothing may be created"
 }
 
+LIMIT_BODY='{"error":"server_limit_reached","servers_total":2,"servers_used":2}'
+
+test_non_interactive_key_at_its_server_limit_says_so() {
+    local output rc=0
+    output=$(bs_run MOCK_LICENSE_CODE=401 MOCK_LICENSE_BODY="$LIMIT_BODY" \
+        BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=KEY-1) || rc=$?
+
+    assert_equals "1" "$rc" "a key at its server limit must stop the install"
+    assert_contains "$output" "already used on every server it allows (2 of 2)" "the limit must be named"
+    assert_contains "$output" "https://sendbroadcast.net/dashboard" "the operator must learn where to free a server"
+    assert_not_contains "$output" "did not accept this license key" "a valid key must not be called wrong"
+    assert_contains "$output" "Nothing was changed" "the message must say nothing changed"
+    assert_file_not_exists "$BS/opt/broadcast" "nothing may be created"
+}
+
+test_interactive_key_at_its_server_limit_says_so_and_re_asks() {
+    printf 'mail.example.com\nFULL-KEY\nKEY-1\ny\n\n' > "$BS/tty"
+    touch "$BS/limit-once"
+    local output rc=0
+    output=$(bs_run MOCK_TTY="$BS/tty") || rc=$?
+
+    assert_equals "0" "$rc" "another key must install"
+    assert_contains "$output" "already used on every server it allows (1 of 1)" "the limit must be named"
+    assert_not_contains "$output" "did not accept this key" "a valid key must not be called wrong"
+    assert_equals "KEY-1" "$(cat "$BS/opt/broadcast/.license")" "the accepted key must be stored"
+}
+
+test_env_license_at_its_server_limit_stops_with_the_reason() {
+    printf 'mail.example.com\n' > "$BS/tty"
+    touch "$BS/limit-once"
+    local output rc=0
+    output=$(bs_run MOCK_TTY="$BS/tty" BROADCAST_LICENSE=FULL-KEY) || rc=$?
+
+    assert_equals "1" "$rc" "a key from the environment at its limit must stop"
+    assert_contains "$output" "BROADCAST_LICENSE is already used on every server it allows" "the reason must be named"
+    assert_file_not_exists "$BS/opt/broadcast" "nothing may be created"
+}
+
 test_an_unreachable_license_server_defers_to_the_installer() {
     local rc=0
     bs_run MOCK_LICENSE_CODE=000 BROADCAST_DOMAIN=mail.example.com BROADCAST_LICENSE=KEY-1 >/dev/null || rc=$?
@@ -611,6 +662,9 @@ run_bootstrap_tests() {
     run_test "test_answering_no_cancels_with_nothing_changed" test_answering_no_cancels_with_nothing_changed
     run_test "test_a_terminal_that_closes_mid_questions_changes_nothing" test_a_terminal_that_closes_mid_questions_changes_nothing
     run_test "test_non_interactive_rejected_key_stops_before_anything_changes" test_non_interactive_rejected_key_stops_before_anything_changes
+    run_test "test_non_interactive_key_at_its_server_limit_says_so" test_non_interactive_key_at_its_server_limit_says_so
+    run_test "test_interactive_key_at_its_server_limit_says_so_and_re_asks" test_interactive_key_at_its_server_limit_says_so_and_re_asks
+    run_test "test_env_license_at_its_server_limit_stops_with_the_reason" test_env_license_at_its_server_limit_stops_with_the_reason
     run_test "test_an_unreachable_license_server_defers_to_the_installer" test_an_unreachable_license_server_defers_to_the_installer
     run_test "test_reboots_by_default_and_no_reboot_is_passed_through" test_reboots_by_default_and_no_reboot_is_passed_through
     run_test "test_ref_override_selects_the_branch" test_ref_override_selects_the_branch
