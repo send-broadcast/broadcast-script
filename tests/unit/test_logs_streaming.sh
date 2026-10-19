@@ -37,6 +37,7 @@ setup_logs_test() {
     LOGS_TRIGGER="$TEST_TMP_DIR/triggers/logs-stream.txt"
     LOGS_OUTPUT="$TEST_TMP_DIR/logs/application.log"
     LOGS_PID_FILE="$TEST_TMP_DIR/logs/.streaming.pid"
+    LOGS_MAX_BYTES=1000
 
     mkdir -p "$TEST_TMP_DIR/triggers" "$TEST_TMP_DIR/logs"
     rm -f "$LOGS_TRIGGER" "$LOGS_OUTPUT" "$LOGS_PID_FILE"
@@ -161,6 +162,131 @@ test_reconcile_clears_trigger_when_volume_unmounted() {
     assert_file_not_exists "$LOGS_PID_FILE" "No streamer should start when volume is not mounted"
 }
 
+# --- cap_log_output ----------------------------------------------------------
+
+# Writes numbered lines until the file is larger than the given byte count.
+write_log_lines() {
+    local file="$1" min_bytes="$2" i=0
+    : > "$file"
+    while [ "$(wc -c < "$file" | tr -d ' ')" -le "$min_bytes" ]; do
+        i=$((i + 1))
+        echo "[web] line $i of the application log" >> "$file"
+    done
+    echo "$i"
+}
+
+file_bytes() {
+    wc -c < "$1" | tr -d ' '
+}
+
+file_inode() {
+    ls -i "$1" | awk '{print $1}'
+}
+
+test_cap_log_output_leaves_small_file_alone() {
+    write_log_lines "$LOGS_OUTPUT" 500 >/dev/null
+    local before
+    before=$(cat "$LOGS_OUTPUT")
+
+    run_sut cap_log_output || true
+
+    assert_equals "$before" "$(cat "$LOGS_OUTPUT")" "A file under the cap must not change"
+}
+
+# A browser tab closed without Stop leaves the streamer on, and nothing else
+# limits application.log. The viewer needs only the newest lines, which the
+# streamer writes again within seconds, so the cap empties the file.
+test_cap_log_output_empties_large_file() {
+    write_log_lines "$LOGS_OUTPUT" 5000 >/dev/null
+
+    run_sut cap_log_output || true
+
+    assert_equals "0" "$(file_bytes "$LOGS_OUTPUT")" "A file over the cap must be emptied"
+}
+
+# The watcher runs as root, and the logs folder is writable by the broadcast
+# user (and by the container on some hosts). A symlink planted at
+# application.log must not let the cap truncate the file it points to.
+test_cap_log_output_does_not_follow_symlink() {
+    local target="$TEST_TMP_DIR/protected-file"
+    write_log_lines "$target" 5000 >/dev/null
+    local before
+    before=$(file_bytes "$target")
+    ln -sf "$target" "$LOGS_OUTPUT"
+
+    run_sut cap_log_output || true
+
+    assert_equals "$before" "$(file_bytes "$target")" "The cap must not change a symlink target"
+    rm -f "$LOGS_OUTPUT"
+}
+
+# The streamer holds application.log open in append mode. A new file (rename
+# or mv) would leave it writing to a deleted inode that still uses the disk.
+test_cap_log_output_truncates_in_place() {
+    write_log_lines "$LOGS_OUTPUT" 5000 >/dev/null
+    local before
+    before=$(file_inode "$LOGS_OUTPUT")
+
+    run_sut cap_log_output || true
+
+    assert_equals "$before" "$(file_inode "$LOGS_OUTPUT")" "The cap must keep the same file (inode)"
+}
+
+test_cap_log_output_ignores_missing_file() {
+    rm -f "$LOGS_OUTPUT"
+
+    if run_sut cap_log_output; then
+        assert_file_not_exists "$LOGS_OUTPUT" "The cap must not create the output file"
+    else
+        assert_equals "0" "non-zero" "The cap must succeed when there is no output file"
+    fi
+}
+
+test_reconcile_caps_output_while_streaming() {
+    sleep 100 &
+    local live_pid=$!
+    echo "$live_pid" > "$LOGS_PID_FILE"
+    echo "2026-01-01T00:00:00Z" > "$LOGS_TRIGGER"
+    write_log_lines "$LOGS_OUTPUT" 5000 >/dev/null
+    mock_command "docker" "" 0    # volume check passes
+    mock_command "ps" "docker logs -f --timestamps app" 0
+
+    run_sut check_log_streaming_trigger || true
+
+    assert_equals "0" "$(file_bytes "$LOGS_OUTPUT")" "The periodic reconcile must cap application.log"
+
+    kill "$live_pid" 2>/dev/null || true
+}
+
+# A streamer that died while the trigger was gone left application.log behind,
+# and nothing removed it. upgrade restarts the watcher, so its first reconcile
+# frees that space on existing installs.
+test_reconcile_removes_stale_output_when_not_streaming() {
+    rm -f "$LOGS_TRIGGER" "$LOGS_PID_FILE"
+    write_log_lines "$LOGS_OUTPUT" 5000 >/dev/null
+    mock_command "docker" "" 0    # volume check passes
+
+    run_sut check_log_streaming_trigger || true
+
+    assert_file_not_exists "$LOGS_OUTPUT" "A stale application.log must be removed when nothing streams"
+}
+
+test_reconcile_keeps_output_while_streaming() {
+    sleep 100 &
+    local live_pid=$!
+    echo "$live_pid" > "$LOGS_PID_FILE"
+    echo "2026-01-01T00:00:00Z" > "$LOGS_TRIGGER"
+    echo "a recent line" > "$LOGS_OUTPUT"
+    mock_command "docker" "" 0
+    mock_command "ps" "docker logs -f --timestamps app" 0
+
+    run_sut check_log_streaming_trigger || true
+
+    assert_file_exists "$LOGS_OUTPUT" "A small application.log must stay while streaming"
+
+    kill "$live_pid" 2>/dev/null || true
+}
+
 # --- runner ------------------------------------------------------------------
 
 run_log_streaming_tests() {
@@ -180,6 +306,14 @@ run_log_streaming_tests() {
     run_test "test_reconcile_starts_when_trigger_present" test_reconcile_starts_when_trigger_present
     run_test "test_reconcile_stops_when_trigger_absent" test_reconcile_stops_when_trigger_absent
     run_test "test_reconcile_clears_trigger_when_volume_unmounted" test_reconcile_clears_trigger_when_volume_unmounted
+    run_test "test_cap_log_output_leaves_small_file_alone" test_cap_log_output_leaves_small_file_alone
+    run_test "test_cap_log_output_empties_large_file" test_cap_log_output_empties_large_file
+    run_test "test_cap_log_output_does_not_follow_symlink" test_cap_log_output_does_not_follow_symlink
+    run_test "test_cap_log_output_truncates_in_place" test_cap_log_output_truncates_in_place
+    run_test "test_cap_log_output_ignores_missing_file" test_cap_log_output_ignores_missing_file
+    run_test "test_reconcile_caps_output_while_streaming" test_reconcile_caps_output_while_streaming
+    run_test "test_reconcile_removes_stale_output_when_not_streaming" test_reconcile_removes_stale_output_when_not_streaming
+    run_test "test_reconcile_keeps_output_while_streaming" test_reconcile_keeps_output_while_streaming
 
     local result
     print_test_summary

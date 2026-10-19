@@ -25,6 +25,9 @@ function display_logs() {
 LOGS_TRIGGER="/opt/broadcast/app/triggers/logs-stream.txt"
 LOGS_OUTPUT="/opt/broadcast/logs/application.log"
 LOGS_PID_FILE="/opt/broadcast/logs/.streaming.pid"
+# The viewer reads only the newest lines (a 200-line backlog, then it follows),
+# so application.log needs no long history. Past LOGS_MAX_BYTES it is emptied.
+LOGS_MAX_BYTES=$((50 * 1024 * 1024))
 
 is_streaming_active() {
   if [ -f "$LOGS_PID_FILE" ]; then
@@ -118,6 +121,26 @@ stop_log_streaming() {
   fi
 }
 
+cap_log_output() {
+  # A browser tab closed without Stop leaves the streamer on, and nothing else
+  # limits this file (the logrotate pattern does not match it).
+  #
+  # This runs as root, and the logs folder is writable by the broadcast user, so
+  # never write through a symlink planted at this path.
+  [ -f "$LOGS_OUTPUT" ] && [ ! -L "$LOGS_OUTPUT" ] || return 0
+
+  local size
+  size=$(wc -c < "$LOGS_OUTPUT" | tr -d ' ')
+  [ "$size" -gt "$LOGS_MAX_BYTES" ] || return 0
+
+  # Truncate in place: the streamer holds the file open in append mode, so a
+  # new file (mv) would leave it writing to a deleted inode that still uses the
+  # disk. The streamer writes new lines again within seconds, and the viewer
+  # reads from the start when the file is shorter than its position.
+  : > "$LOGS_OUTPUT"
+  echo "[$(date)] Emptied application.log at $size bytes"
+}
+
 check_log_streaming_trigger() {
   # Safety check: only run if volume mount exists (container was recreated with new compose)
   if ! docker exec app test -d /rails/logs 2>/dev/null; then
@@ -133,9 +156,16 @@ check_log_streaming_trigger() {
     if ! is_streaming_active; then
       start_log_streaming
     fi
+    cap_log_output
   else
     if is_streaming_active; then
       stop_log_streaming
+    elif [ -e "$LOGS_OUTPUT" ] || [ -L "$LOGS_OUTPUT" ]; then
+      # Left behind by a streamer that died with the trigger gone; nothing else
+      # removes it. upgrade restarts this watcher, so existing installs get the
+      # space back on the first reconcile.
+      rm -f "$LOGS_OUTPUT"
+      echo "[$(date)] Removed a stale application.log"
     fi
   fi
 }

@@ -142,6 +142,28 @@ logs under `/opt/broadcast/logs/` in case support needs more detail. Run it
 **before** restarting anything — restarting destroys the container logs
 that explain what happened.
 
+### Logs and disk space
+
+Container output goes to the systemd journal (`journalctl CONTAINER_NAME=app`).
+Broadcast logs at `info`. To change the level, set `RAILS_LOG_LEVEL` (`debug`,
+`info`, `warn` or `error`) in `/opt/broadcast/app/.env` and run
+`./broadcast.sh restart`. Use `debug` only for a short investigation: it logs
+every SQL statement, which can contain personal data and fills the disk
+quickly. Up to 2.50.2, Broadcast ignored this setting and always logged at
+`debug`; `upgrade` fixes an existing server.
+
+The web log viewer (Application Logs) streams into
+`/opt/broadcast/logs/application.log`. The log watcher empties that file when
+it passes 50 MB, and removes it when no stream runs.
+
+To see and free the space that logs use:
+
+```bash
+journalctl --disk-usage
+du -sh /opt/broadcast/logs
+sudo journalctl --vacuum-size=1G   # keep the newest 1 GB of the journal
+```
+
 ## License
 
 This script is intended for customers of Broadcast. Please refer to the license that came with your Broadcast product for the terms of use.

@@ -61,6 +61,16 @@ test_sample_encryption_values_are_empty() {
     assert_equals "" "$nonempty" "encryption variables with a value in manual/app/.env.sample"
 }
 
+# Broadcast logs at info unless RAILS_LOG_LEVEL says otherwise. Operators need
+# to find the switch in the sample, and the sample must not turn debug on: debug
+# writes every SQL statement to the host journal and has filled disks.
+test_sample_documents_rails_log_level() {
+    local content
+    content=$(cat "$APP_SAMPLE")
+    assert_contains "$content" "# RAILS_LOG_LEVEL=info" "sample shows the log level switch, commented out at the default"
+    assert_equals "" "$(grep -E '^RAILS_LOG_LEVEL=' "$APP_SAMPLE")" "sample must not set a log level"
+}
+
 run_manual_env_sample_tests() {
     init_test_framework
 
@@ -68,6 +78,7 @@ run_manual_env_sample_tests() {
     run_test "test_sample_has_every_encryption_variable" test_sample_has_every_encryption_variable
     run_test "test_sample_explains_how_to_generate_keys" test_sample_explains_how_to_generate_keys
     run_test "test_sample_encryption_values_are_empty" test_sample_encryption_values_are_empty
+    run_test "test_sample_documents_rails_log_level" test_sample_documents_rails_log_level
 
     local result
     print_test_summary
