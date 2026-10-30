@@ -13,8 +13,12 @@ services:
       - /home/replace-with-your-user/broadcast/logs:/rails/logs
     ports:
       - "127.0.0.1:3000:3000" # Overrides default ports
+    # Plugins (optional): the Host API listens on 3100 for the plugins container only. Never publish it.
+    secrets:
+      - plugin_runtime_secret
     networks:
       - broadcast-network
+      - plugins-internal
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,13 +39,78 @@ services:
       - /home/replace-with-your-user/broadcast/app/.env
     volumes:
       - /home/replace-with-your-user/broadcast/app/storage:/rails/storage
+    secrets:
+      - plugin_runtime_secret
     networks:
       - broadcast-network
+      - plugins-internal
     depends_on:
       postgres:
         condition: service_healthy
     command:
       - "bin/jobs"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Plugins (optional). Runs plugin code with only the permissions an admin approved. No env_file:
+  # this container never sees app/.env, the database or the internet (only through egress).
+  plugins:
+    image: ${DOCKER_IMAGE:-gitea.hostedapp.org/broadcast/broadcast:latest}
+    platform: linux/${TARGETARCH:-amd64}
+    pull_policy: missing
+    container_name: plugins
+    restart: always
+    command: ["bin/plugin-runtime"]
+    environment:
+      PLUGIN_HOST_API_URL: http://app:3100
+      PLUGIN_EGRESS_URL: http://egress:4750
+      DENO_DIR: /tmp/deno
+      PLUGINS_MEMORY_LIMIT_MB: ${PLUGINS_MEMORY_LIMIT_MB:-256}
+      BROADCAST_PLUGINS_SAFE_MODE: ${BROADCAST_PLUGINS_SAFE_MODE:-0}
+    secrets:
+      - plugin_runtime_secret
+    read_only: true
+    tmpfs:
+      - /tmp
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${PLUGINS_MEMORY_LIMIT_MB:-256}m
+    cpus: ${PLUGINS_CPU_LIMIT:-0.5}
+    pids_limit: 512
+    networks:
+      - plugins-internal
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # The only way out for plugins: refuses private, metadata and the server's own addresses, and
+  # lets each plugin reach only its own approved hosts.
+  egress:
+    image: ${DOCKER_IMAGE:-gitea.hostedapp.org/broadcast/broadcast:latest}
+    platform: linux/${TARGETARCH:-amd64}
+    pull_policy: missing
+    container_name: egress
+    restart: always
+    command: ["broadcast-egress"]
+    environment:
+      PLUGIN_RUNTIME_URL: http://plugins:8787
+      BROADCAST_PUBLIC_IPS: ${BROADCAST_PUBLIC_IPS:-}
+    secrets:
+      - plugin_runtime_secret
+    read_only: true
+    user: "1000:1000"
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    networks:
+      - plugins-internal
+      - plugins-egress
     logging:
       driver: "json-file"
       options:
@@ -77,3 +146,14 @@ services:
 networks:
   broadcast-network:
     driver: bridge
+  plugins-internal:
+    driver: bridge
+    internal: true # no internet route: plugins leave only through egress
+  plugins-egress:
+    driver: bridge
+
+secrets:
+  plugin_runtime_secret:
+    # 64 hex characters, owned by uid 1000, mode 0400. Create it with:
+    #   openssl rand -hex 32 > secrets/plugin_runtime_secret && sudo chown 1000:1000 secrets/plugin_runtime_secret && chmod 0400 secrets/plugin_runtime_secret
+    file: /home/replace-with-your-user/broadcast/secrets/plugin_runtime_secret
