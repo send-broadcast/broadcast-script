@@ -80,6 +80,21 @@ function _preflight_count() {
   esac
 }
 
+# Plugins (v3) whose manifest does not support the target version stop after the upgrade until
+# they are updated. A warning, never a reason to block. Only a plain version reaches the app.
+_preflight_plugin_warnings() {
+  local target_version="$1"
+  [[ "$target_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+
+  local incompatible limit=()
+  command -v timeout >/dev/null 2>&1 && limit=(timeout 60)
+  incompatible=$("${limit[@]}" docker exec app bin/rails "plugins:incompatible[$target_version]" 2>/dev/null) || return 0
+  [ -n "$incompatible" ] || return 0
+
+  echo -e "\e[33mPreflight: these plugins do not support Broadcast $target_version and will stop until they are updated:\e[0m"
+  echo "$incompatible" | sed 's/^/  - /'
+}
+
 # upgrade_preflight [--automated] [target_version]
 # Exit 0 = safe to proceed. Exit 1 = work in flight.
 function upgrade_preflight() {
@@ -91,6 +106,8 @@ function upgrade_preflight() {
     esac
     shift
   done
+
+  _preflight_plugin_warnings "$target_version"
 
   local deferral_file
   deferral_file=$(_preflight_deferral_file)

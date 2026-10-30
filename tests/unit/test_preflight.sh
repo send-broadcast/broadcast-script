@@ -25,6 +25,7 @@ setup_sandbox() {
     # psql answers are keyed off the table each query names, so a test can
     # simulate in-flight work independently for jobs and broadcasts.
     harness_mock docker 'case "$*" in
+  *plugins:incompatible*) printf "%s\n" "${PLUGINS_MOCK:-}" ;;
   *pg_terminate_backend*) echo "${TERMINATED_MOCK:-0}" ;;
   *pg_stat_activity*) printf "%s\n" "${SESSIONS_MOCK:-}" ;;
   *solid_queue_claimed_executions*) echo "${CLAIMED_MOCK:-0}" ;;
@@ -43,6 +44,20 @@ test_preflight_passes_when_nothing_is_in_flight() {
     sandbox_run "upgrade_preflight" >/dev/null || rc=$?
 
     assert_equals "0" "$rc" "an idle system must be safe to upgrade"
+}
+
+test_preflight_warns_about_plugins_that_do_not_support_the_target_without_blocking() {
+    local output rc=0
+    output=$(sandbox_run "upgrade_preflight 4.0.0" 'export PLUGINS_MOCK="acme.crm 1.2.0 needs Broadcast >=3.0.0 <4.0.0"') || rc=$?
+
+    assert_equals "0" "$rc" "an incompatible plugin must not block the upgrade"
+    assert_contains "$output" "acme.crm 1.2.0 needs Broadcast" "the operator should see which plugin stops"
+    harness_assert_called "docker exec app bin/rails plugins:incompatible[4.0.0]" "the app should be asked about the target version"
+}
+
+test_preflight_does_not_pass_a_strange_target_to_the_app() {
+    sandbox_run "upgrade_preflight '4.0.0;rm -rf /'" >/dev/null || true
+    harness_assert_not_called "plugins:incompatible" "only a plain version may reach the app"
 }
 
 test_preflight_blocks_while_a_job_is_mid_execution() {
@@ -219,6 +234,8 @@ run_preflight_tests() {
     run_test "test_upgrade_proceeds_normally_when_nothing_is_in_flight" test_upgrade_proceeds_normally_when_nothing_is_in_flight
     run_test "test_automated_upgrade_defers_without_reporting_failure" test_automated_upgrade_defers_without_reporting_failure
     run_test "test_disconnect_terminates_client_backends" test_disconnect_terminates_client_backends
+    run_test "test_preflight_warns_about_plugins_that_do_not_support_the_target_without_blocking" test_preflight_warns_about_plugins_that_do_not_support_the_target_without_blocking
+    run_test "test_preflight_does_not_pass_a_strange_target_to_the_app" test_preflight_does_not_pass_a_strange_target_to_the_app
     run_test "test_disconnect_names_the_sessions_it_closed" test_disconnect_names_the_sessions_it_closed
     run_test "test_disconnect_never_aborts_when_postgres_is_unreachable" test_disconnect_never_aborts_when_postgres_is_unreachable
     run_test "test_upgrade_disconnects_clients_before_stopping_the_service" test_upgrade_disconnects_clients_before_stopping_the_service
