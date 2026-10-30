@@ -10,13 +10,16 @@ function display_logs() {
       db)
         docker logs --follow postgres
         ;;
+      plugins|egress)
+        docker logs --follow "$2"
+        ;;
       *)
-        echo "Please specify a valid log type: app, job, or db"
+        echo "Please specify a valid log type: app, job, db, plugins or egress"
         exit 1
         ;;
     esac
   else
-    echo "Usage: $0 logs <app|job|db>"
+    echo "Usage: $0 logs <app|job|db|plugins|egress>"
     exit 1
   fi
 }

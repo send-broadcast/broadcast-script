@@ -36,6 +36,7 @@ function includeDependencies() {
   source "${current_dir}/scripts/update.sh"
   source "${current_dir}/scripts/logs.sh"
   source "${current_dir}/scripts/two_factor.sh"
+  source "${current_dir}/scripts/plugins.sh"
 }
 
 # Single switch for the developer 'edge' channel. Enabling a host means TWO
@@ -135,6 +136,7 @@ function display_help() {
   echo "  validate_license         Validate the license for Broadcast"
   echo "  change_installation_domain Change the primary installation domain"
   echo "  generate_encryption_keys Generate Active Record encryption keys"
+  echo "  plugins safe-mode on|off|status  Turn every plugin off, or on again"
   echo "  two_factor <subcommand>  Recover from a two-factor authentication lock-out:"
   echo "                          reset <email> | disable_enforcement | status"
   echo
@@ -288,6 +290,10 @@ main() {
     two_factor)
       shift
       two_factor "$@"
+      ;;
+    plugins)
+      shift
+      plugins "$@"
       ;;
     logs)
       if [ $# -lt 2 ]; then

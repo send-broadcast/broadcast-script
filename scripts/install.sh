@@ -174,6 +174,9 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
   source /opt/broadcast/scripts/init-services.sh
   create_broadcast_service
 
+  # Plugins: the secret Rails, the plugin runtime and the egress proxy share (scripts/plugins.sh)
+  ensure_plugin_runtime_secret || echo -e "\e[33mWarning: could not create the plugin runtime secret; plugins stay off.\e[0m"
+
   # Pull docker images and start the service as the broadcast user
   sudo -u broadcast bash << EOF
     cd /opt/broadcast

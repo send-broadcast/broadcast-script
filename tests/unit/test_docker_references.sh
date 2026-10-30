@@ -106,9 +106,13 @@ test_compose_up_must_not_depend_on_the_registry() {
         assert_equals "0" "$always_count" \
             "$(basename "$file"): pull_policy: always makes boot fail when the registry is unreachable"
 
+        # Every service on the Broadcast image (app, job, and the optional plugins and egress)
+        local image_count
+        image_count=$(/usr/bin/grep -c 'image: ${DOCKER_IMAGE' "$file" || true)
         missing_count=$(/usr/bin/grep -c "pull_policy: missing" "$file" || true)
-        assert_equals "2" "$missing_count" \
-            "$(basename "$file"): app and job should pin pull_policy: missing so up never pulls"
+        assert_equals "4" "$image_count" "$(basename "$file"): app, job, plugins and egress use the Broadcast image"
+        assert_equals "$image_count" "$missing_count" \
+            "$(basename "$file"): every Broadcast image service should pin pull_policy: missing so up never pulls"
     done
 }
 
@@ -122,8 +126,8 @@ test_compose_up_must_not_depend_on_the_registry() {
 test_production_compose_logs_to_journald() {
     local journald_count json_count
     journald_count=$(/usr/bin/grep -c 'driver: "journald"' "$COMPOSE_FILE" || true)
-    assert_equals "3" "$journald_count" \
-        "app, job and postgres must log to journald so logs survive compose down"
+    assert_equals "5" "$journald_count" \
+        "app, job, postgres, plugins and egress must log to journald so logs survive compose down"
 
     json_count=$(/usr/bin/grep -c 'driver: "json-file"' "$COMPOSE_FILE" || true)
     assert_equals "0" "$json_count" \

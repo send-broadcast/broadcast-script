@@ -28,5 +28,13 @@ function update() {
 
   git pull
 
+  # Plugins: the new docker-compose.yml may add the plugins and egress services, which wait for
+  # this secret (Broadcast itself starts without it)
+  if [ -f /opt/broadcast/scripts/plugins.sh ]; then
+    # shellcheck disable=SC1091
+    source /opt/broadcast/scripts/plugins.sh
+    ensure_plugin_runtime_secret || true
+  fi
+
   echo -e "\e[32mBroadcast scripts upgraded successfully!\e[0m"
 }
