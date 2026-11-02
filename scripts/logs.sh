@@ -11,6 +11,10 @@ function display_logs() {
         docker logs --follow postgres
         ;;
       plugins|egress)
+        if declare -F plugin_runtime_profile_enabled >/dev/null && ! plugin_runtime_profile_enabled; then
+          echo "The optional runtime service is off on this server: there are no $2 logs."
+          return 0
+        fi
         docker logs --follow "$2"
         ;;
       *)

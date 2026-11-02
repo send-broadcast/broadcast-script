@@ -223,6 +223,9 @@ function _upgrade_continue() {
   # Plugins: create the shared runtime secret once (the plugins and egress services wait for it)
   ensure_plugin_runtime_secret || true
 
+  # Turn the optional runtime service on only for an image that contains it (scripts/plugins.sh)
+  sync_plugin_runtime_profile || true
+
   echo -e "\e[33mRestarting Broadcast service...\e[0m"
   systemctl start broadcast
 

@@ -181,8 +181,12 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
   sudo -u broadcast bash << EOF
     cd /opt/broadcast
     set -a && source .image && set +a && docker compose pull
-    sudo systemctl start broadcast.service
 EOF
+
+  # Turn the optional runtime service on only for an image that contains it (scripts/plugins.sh)
+  sync_plugin_runtime_profile || true
+
+  sudo systemctl start broadcast.service
 
   echo -e "\e[33mBroadcast Docker Compose service created and started!\e[0m"
 

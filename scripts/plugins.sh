@@ -65,7 +65,10 @@ plugins_set_safe_mode() {
       source .image
       set +a
     fi
-    docker compose up -d --force-recreate app job plugins
+    # Name the runtime service only when its profile is on: naming a service turns its profile on
+    local services=(app job)
+    plugin_runtime_profile_enabled && services+=(plugins)
+    docker compose up -d --force-recreate "${services[@]}"
   ) || {
     echo -e "\e[31mError: could not restart app, job and plugins.\e[0m"
     return 1
@@ -80,4 +83,74 @@ ensure_plugin_runtime_secret() {
   (umask 077 && openssl rand -hex 32 > "$PLUGIN_SECRET_FILE")
   chown 1000:1000 "$PLUGIN_SECRET_FILE" 2>/dev/null || sudo chown 1000:1000 "$PLUGIN_SECRET_FILE" 2>/dev/null || true
   chmod 0400 "$PLUGIN_SECRET_FILE"
+}
+
+# The optional runtime service and its proxy (egress) are in the Compose profile `runtime`, off by default:
+# released images do not contain bin/plugin-runtime, and a service that runs it restart-loops with
+# exit 127. sync_plugin_runtime_profile turns the profile on in /opt/broadcast/.env (COMPOSE_PROFILES,
+# read by Compose and by the systemd unit's `docker compose up`) only when the selected image
+# contains the binary. install, upgrade and update call it after the image is pulled.
+PLUGIN_RUNTIME_PROFILE="runtime"
+PLUGIN_RUNTIME_BINARY="/rails/bin/plugin-runtime"
+
+plugin_runtime_profile_enabled() {
+  local profiles
+  profiles=$(grep '^COMPOSE_PROFILES=' "$PLUGINS_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "\"' ")
+  [[ ",$profiles," == *",$PLUGIN_RUNTIME_PROFILE,"* ]]
+}
+
+# Rewrite COMPOSE_PROFILES with the runtime profile added (on) or removed (off). Other profiles
+# and every other line of .env stay. .env holds the registry password: it is rewritten in place,
+# so its owner and mode do not change.
+set_plugin_runtime_profile() {
+  local state="$1" profiles="" kept="" p tmp
+  tmp=$(umask 077 && mktemp)
+  if [ -f "$PLUGINS_ENV_FILE" ]; then
+    profiles=$(grep '^COMPOSE_PROFILES=' "$PLUGINS_ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"' ")
+    grep -v '^COMPOSE_PROFILES=' "$PLUGINS_ENV_FILE" > "$tmp" || true
+  fi
+  local IFS=','
+  for p in $profiles; do
+    [ -n "$p" ] && [ "$p" != "$PLUGIN_RUNTIME_PROFILE" ] && kept="${kept:+$kept,}$p"
+  done
+  [ "$state" = "on" ] && kept="${kept:+$kept,}$PLUGIN_RUNTIME_PROFILE"
+  [ -n "$kept" ] && echo "COMPOSE_PROFILES=$kept" >> "$tmp"
+  cat "$tmp" > "$PLUGINS_ENV_FILE"
+  rm -f "$tmp"
+  return 0
+}
+
+# 0 = the image contains the binary, 1 = it does not, 2 = docker could not answer
+image_has_plugin_runtime() {
+  local image="$1" rc=0
+  [ -n "$image" ] || return 2
+  docker run --rm --pull never --entrypoint test "$image" -x "$PLUGIN_RUNTIME_BINARY" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
+sync_plugin_runtime_profile() {
+  local image rc=0
+  image=$(grep '^DOCKER_IMAGE=' /opt/broadcast/.image 2>/dev/null | tail -1 | cut -d= -f2-)
+  image_has_plugin_runtime "$image" || rc=$?
+
+  case "$rc" in
+    0)
+      set_plugin_runtime_profile on
+      echo -e "\e[32mThe optional runtime service is on (the image contains it).\e[0m"
+      ;;
+    1)
+      set_plugin_runtime_profile off
+      # A container from an earlier start would keep restarting; Compose no longer manages it
+      docker rm -f plugins egress >/dev/null 2>&1 || true
+      echo "The optional runtime service stays off (this image does not contain it)."
+      ;;
+    *)
+      echo -e "\e[33mWarning: could not check the image for the optional runtime service; its setting is unchanged.\e[0m"
+      ;;
+  esac
+  return 0
 }

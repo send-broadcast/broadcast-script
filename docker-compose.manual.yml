@@ -61,7 +61,10 @@ services:
   # env_file: this container never sees app/.env, the database or the internet (only through
   # egress). It waits for the runtime secret (/home/replace-with-your-user/broadcast/secrets/plugin_runtime_secret, created by
   # install, upgrade and update); Broadcast starts without it.
+  # Off by default: only images that contain bin/plugin-runtime can run it. The `runtime` profile
+  # turns it and egress on (COMPOSE_PROFILES=runtime in the .env next to this file).
   plugins:
+    profiles: ["runtime"]
     image: ${DOCKER_IMAGE:-gitea.hostedapp.org/broadcast/broadcast:latest}
     platform: linux/${TARGETARCH:-amd64}
     pull_policy: missing
@@ -96,6 +99,7 @@ services:
   # The only way out for plugins: refuses private, metadata and the server's own addresses (set
   # BROADCAST_PUBLIC_IPS in .env) and lets each plugin process reach only its approved hosts.
   egress:
+    profiles: ["runtime"]
     image: ${DOCKER_IMAGE:-gitea.hostedapp.org/broadcast/broadcast:latest}
     platform: linux/${TARGETARCH:-amd64}
     pull_policy: missing

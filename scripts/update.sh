@@ -34,6 +34,8 @@ function update() {
     # shellcheck disable=SC1091
     source /opt/broadcast/scripts/plugins.sh
     ensure_plugin_runtime_secret || true
+    # The new compose file keeps the optional runtime service off unless the image contains it
+    sync_plugin_runtime_profile || true
   fi
 
   echo -e "\e[32mBroadcast scripts upgraded successfully!\e[0m"

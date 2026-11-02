@@ -28,7 +28,8 @@ check_license() { :; }
 '
 
 test_safe_mode_on_writes_the_flag_and_recreates_the_services() {
-    echo "BROADCAST_REGISTRY_URL=r.example" > "$SANDBOX_ROOT/.env"
+    # The runtime profile is on (an image that contains the runtime), so the runtime service restarts too
+    printf 'BROADCAST_REGISTRY_URL=r.example\nCOMPOSE_PROFILES=runtime\n' > "$SANDBOX_ROOT/.env"
     local output rc=0
     output=$(sandbox_run "plugins safe-mode on") || rc=$?
 
@@ -40,7 +41,7 @@ test_safe_mode_on_writes_the_flag_and_recreates_the_services() {
 }
 
 test_safe_mode_off_clears_the_flag() {
-    echo "BROADCAST_PLUGINS_SAFE_MODE=1" > "$SANDBOX_ROOT/.env"
+    printf 'BROADCAST_PLUGINS_SAFE_MODE=1\nCOMPOSE_PROFILES=runtime\n' > "$SANDBOX_ROOT/.env"
     local rc=0
     sandbox_run "plugins safe-mode off" >/dev/null || rc=$?
 
@@ -98,6 +99,7 @@ main help")
 }
 
 test_logs_accepts_plugins_and_egress() {
+    echo "COMPOSE_PROFILES=runtime" > "$SANDBOX_ROOT/.env"
     sandbox_run "display_logs logs plugins" >/dev/null
     harness_assert_called "docker logs --follow plugins" "logs plugins should follow the plugins container"
     sandbox_run "display_logs logs egress" >/dev/null
