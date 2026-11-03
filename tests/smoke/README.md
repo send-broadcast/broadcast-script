@@ -57,11 +57,37 @@ By default the VM clones `https://github.com/send-broadcast/broadcast-script.git
 ./tests/smoke/test_multipass_smoke.sh --ubuntu 26.04 --test-reboot --verbose --no-cleanup
 ```
 
+## The Two Scripts
+
+- `test_multipass_smoke.sh` installs from a clone with `broadcast.sh install` and runs the long list of checks below (install state, backup/restore, journald, reboot, upgrade hardening, domain change).
+- `test_bootstrap_e2e.sh` tests the one-line installer (`curl ... | sudo bash`) as customers run it, in three scenarios: `noninteractive`, `interactive` (driven over a real TTY by `expect`), and `legacy-upgrade`.
+
+Both get their VM plumbing from `lib/smoke_vm.sh`: the Vagrantfile, the QEMU flags, the ssh helpers and the redaction. Do not write a Vagrantfile in a script. The shared one carries a fix for Vagrant 2.4 on macOS 27, which otherwise reports every localhost port as in use ("The forwarded port to ... is already in use") and starts no VM. `tests/unit/test_smoke_harness.sh` (part of `tests/run_all_tests.sh`, no VM needed) fails when a smoke script stops using the helper or the fix goes missing.
+
+### Secrets in the output
+
+Everything the scripts print goes through `lib/redact.pl`. It masks the license key, the registry login and the secret values from the VM's env files, also when the key is echoed by the TTY, repeated in a prompt, wrapped over two lines, broken up by escape codes, or cut short. Saved files (the `expect` transcript, the install output) are masked in place. Values of `NAME=value` lines whose name says secret (`PASSWORD`, `SECRET`, `LICENSE`, `TOKEN`, `_KEY`, `_LOGIN`) are masked even when the harness does not know them. Check a saved log without printing the key:
+
+```bash
+grep -c -F -f <(sed -n 's/^BROADCAST_LICENSE_KEY=//p' tests/smoke/.smoke-test.env) your-run.log   # must print 0
+```
+
+### Upgrades from an older release
+
+`legacy-upgrade` installs an older commit the way customers installed it then (`--from`, default `a1df6f0`, the last commit before the env-file changes), then upgrades it to `--ref`. It runs two paths on fresh VMs: `broadcast.sh upgrade`, and the nightly `update` cron command run twice. After each step it checks the stack, the owner and mode of `.env`, `app/.env` and `db/.env` (`broadcast:broadcast 600` once the new scripts ran), `broadcast.service`, and a restart.
+
+```bash
+./tests/smoke/test_bootstrap_e2e.sh --ubuntu 24.04 --scenario legacy-upgrade --ref main --from a1df6f0
+./tests/smoke/test_bootstrap_e2e.sh --ubuntu 24.04 --scenario legacy-upgrade --ref main --path nightly
+```
+
+The scripts install what is on GitHub. To run a harness change before it is pushed, run the script from your checkout; `--ref` picks the code under test.
+
 ## What It Does
 
 For each Ubuntu version selected:
 
-1. **Setup VM** - Launches Ubuntu VM via Vagrant + VMware (2 CPUs, 2G RAM); clones the canonical repo into `/opt/broadcast` (or copies the local working tree with `--local`)
+1. **Setup VM** - Launches Ubuntu VM via Vagrant + QEMU (2 CPUs, 2G RAM); clones the canonical repo into `/opt/broadcast` (or copies the local working tree with `--local`)
 2. **Prepare Installation** - Pre-creates config files to bypass interactive prompts
 3. **Run Installer** - Executes `./broadcast.sh install`
 4. **Health Checks** - Verifies containers, database, HTTP endpoints, systemd service, cron jobs
