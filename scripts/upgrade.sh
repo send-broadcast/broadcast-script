@@ -220,6 +220,9 @@ function _upgrade_continue() {
   # with the wrong owner are touched, so this is cheap once things are right.
   chown_container_writable_dirs || true
 
+  # The env files hold secrets: readable by their owner only (see common.sh)
+  secure_env_files
+
   echo -e "\e[33mRestarting Broadcast service...\e[0m"
   systemctl start broadcast
 

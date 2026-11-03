@@ -112,6 +112,19 @@ test_load_registry_info_keeps_spaces_and_equals_signs() {
     assert_equals "[$REGISTRY_PASSWORD]" "$output" "the value must be exported unchanged"
 }
 
+# The env files hold the registry login, the database password and the Rails keys. install must
+# leave them readable by the broadcast user only (it runs docker compose, which reads them).
+test_install_leaves_the_env_files_readable_by_their_owner_only() {
+    harness_fake_ownership
+    /bin/chmod 644 "$SANDBOX_ROOT/.env"
+    run_install "umask 022" >/dev/null
+
+    local f
+    for f in .env app/.env db/.env; do
+        assert_equals "broadcast:broadcast 600" "$(harness_owner_and_mode "$SANDBOX_ROOT/$f")" "install must leave $f at mode 600"
+    done
+}
+
 test_fail2ban_checksum_mismatch_stops_the_install() {
     local output rc=0
     output=$(run_install "export MOCK_SHA_RC=1") || rc=$?
@@ -201,6 +214,7 @@ run_install_tests() {
     run_test "test_registry_password_never_appears_in_a_command_line" test_registry_password_never_appears_in_a_command_line
     run_test "test_load_registry_info_keeps_spaces_and_equals_signs" test_load_registry_info_keeps_spaces_and_equals_signs
     run_test "test_fail2ban_checksum_mismatch_stops_the_install" test_fail2ban_checksum_mismatch_stops_the_install
+    run_test "test_install_leaves_the_env_files_readable_by_their_owner_only" test_install_leaves_the_env_files_readable_by_their_owner_only
     run_test "test_fail2ban_package_is_verified_before_install" test_fail2ban_package_is_verified_before_install
     run_test "test_install_schedules_the_reboot_instead_of_rebooting_now" test_install_schedules_the_reboot_instead_of_rebooting_now
     run_test "test_no_reboot_skips_the_reboot" test_no_reboot_skips_the_reboot

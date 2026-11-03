@@ -145,6 +145,7 @@ run_unit_tests() {
     run_test_suite "Docker Reference Consistency" "$SCRIPT_DIR/unit/test_docker_references.sh"
     run_test_suite "Gitignored Runtime Files" "$SCRIPT_DIR/unit/test_gitignore_runtime_files.sh"
     run_test_suite "Manual .env Sample" "$SCRIPT_DIR/unit/test_manual_env_sample.sh"
+    run_test_suite "Env File Modes" "$SCRIPT_DIR/unit/test_env_file_modes.sh"
 }
 
 # Run integration tests

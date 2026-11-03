@@ -141,6 +141,61 @@ MOCK
     chmod +x "$SANDBOX_ROOT/mocks/grep"
 }
 
+# harness_fake_ownership
+# The sandbox runs unprivileged, so a real chown to uid 1000 or to the broadcast user fails. This
+# replaces chown with a recorder and stat with a reader of those records, so a test can assert who
+# owns a file after a sequence of chowns:
+#   chown [-R] OWNER PATH...   records OWNER for each PATH (with -R, for everything below it too)
+#   stat -c FORMAT PATH        %U %u = the user, %G %g = the group of the last record that covers
+#                              PATH ("dev" when none does); %a = the real mode; %i = the real inode
+#   chmod                      real, but only for paths inside the sandbox
+harness_fake_ownership() {
+    : > "$SANDBOX_ROOT/.fake_owners"
+    harness_mock chown 'recursive=-
+args=()
+for a in "$@"; do
+  case "$a" in
+    -R) recursive=R ;;
+    -*) ;;
+    *) args+=("$a") ;;
+  esac
+done
+for p in "${args[@]:1}"; do
+  printf "%s\t%s\t%s\n" "$recursive" "${args[0]}" "$p" >> "$BROADCAST_ROOT/.fake_owners"
+done
+exit 0'
+    harness_mock stat 'fmt="" path=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c) fmt="$2"; shift 2 ;;
+    *) path="$1"; shift ;;
+  esac
+done
+[ -e "$path" ] || { echo "stat: cannot stat $path" >&2; exit 1; }
+owner=$(awk -F "\t" -v p="$path" "(\$3 == p) || (\$1 == \"R\" && index(p, \$3 \"/\") == 1) { o = \$2 } END { print o }" "$BROADCAST_ROOT/.fake_owners")
+[ -n "$owner" ] || owner="dev:dev"
+user="${owner%%:*}"
+group="${owner#*:}"
+mode=$(/usr/bin/stat -c %a "$path" 2>/dev/null || /usr/bin/stat -f %Lp "$path")
+inode=$(ls -id "$path" | awk "{ print \$1 }")
+out="$fmt"
+out="${out//%U/$user}"; out="${out//%u/$user}"
+out="${out//%G/$group}"; out="${out//%g/$group}"
+out="${out//%a/$mode}"; out="${out//%i/$inode}"
+echo "$out"'
+    harness_mock chmod 'last=""
+for a in "$@"; do last="$a"; done
+case "$last" in
+  "$BROADCAST_ROOT"/*) exec /bin/chmod "$@" ;;
+esac
+exit 0'
+}
+
+# harness_owner_and_mode <path>: "<user>:<group> <mode>" as the fake ownership records it
+harness_owner_and_mode() {
+    BROADCAST_ROOT="$SANDBOX_ROOT" "$SANDBOX_ROOT/mocks/stat" -c "%u:%g %a" "$1"
+}
+
 harness_mock_uname_arm64() {
     harness_mock uname 'echo "arm64"'
 }
