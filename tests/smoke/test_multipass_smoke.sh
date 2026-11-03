@@ -518,12 +518,20 @@ run_health_checks() {
 
     # Check: app redirects to onboarding on fresh install
     log_test "Fresh install shows onboarding screen"
-    local redirect_location
-    redirect_location=$(vm_exec_root "docker exec app curl -sf -o /dev/null -w \"%{redirect_url}\" http://localhost:3000/" 2>/dev/null || true)
+    # Polled like the checks above: right after a reboot the first page request
+    # can come before the app serves it. The attempt count and the HTTP code are
+    # printed, so a retry that was needed shows in the log.
+    local redirect_location="" http_result="" attempt
+    for attempt in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        http_result=$(vm_exec_root "docker exec app curl -s -o /dev/null -w \"%{http_code} %{redirect_url}\" http://localhost:3000/" 2>/dev/null || true)
+        redirect_location="${http_result#* }"
+        echo "$redirect_location" | grep -q "onboarding" && break
+        sleep 5
+    done
     if echo "$redirect_location" | grep -q "onboarding"; then
-        log_success "App redirects to onboarding: $redirect_location"
+        log_success "App redirects to onboarding: $redirect_location (attempt $attempt)"
     else
-        log_fail "App did not redirect to onboarding (got: $redirect_location)"
+        log_fail "App did not redirect to onboarding after $attempt attempts (last: HTTP ${http_result:-no response})"
     fi
 }
 
