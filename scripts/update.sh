@@ -49,5 +49,8 @@ function _update_continue() {
     sync_plugin_runtime_profile || true
   fi
 
+  # The env files hold secrets: readable by their owner only (see common.sh)
+  secure_env_files
+
   echo -e "\e[32mBroadcast scripts upgraded successfully!\e[0m"
 }

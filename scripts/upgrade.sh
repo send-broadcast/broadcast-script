@@ -226,6 +226,9 @@ function _upgrade_continue() {
   # Turn the optional runtime service on only for an image that contains it (scripts/plugins.sh)
   sync_plugin_runtime_profile || true
 
+  # The env files hold secrets: readable by their owner only (see common.sh)
+  secure_env_files
+
   echo -e "\e[33mRestarting Broadcast service...\e[0m"
   systemctl start broadcast
 

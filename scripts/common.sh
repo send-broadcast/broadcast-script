@@ -95,6 +95,23 @@ chown_container_writable_dirs() {
   return 0
 }
 
+# The env files hold secrets: .env the registry login, app/.env the database password and the
+# Rails keys, db/.env the database password. Only their owner may read them. The broadcast user
+# owns them (install), and broadcast.service runs `docker compose` as that user, which reads all
+# three. install, upgrade and the nightly update call this. The owner stays, except a file that
+# root replaced (an older validate_license did): the broadcast user could not read it at mode 600.
+secure_env_files() {
+  local f
+  for f in /opt/broadcast/.env /opt/broadcast/app/.env /opt/broadcast/db/.env; do
+    [ -f "$f" ] || continue
+    if [ "$(stat -c %U "$f" 2>/dev/null)" = "root" ] && id broadcast >/dev/null 2>&1; then
+      chown broadcast:broadcast "$f" || true
+    fi
+    chmod 600 "$f" || true
+  done
+  return 0
+}
+
 check_installation_domain() {
   if [ -f /opt/broadcast/.domain ]; then
     return
@@ -267,13 +284,18 @@ validate_license() {
 
   # Replace, never append: validate_license is run casually for its
   # summary, and blind appends would grow .env with duplicate credentials
+  # .env is rewritten in place, so its owner stays, and only its owner can read it
+  local env_tmp
+  env_tmp=$(umask 077 && mktemp)
   if [ -f /opt/broadcast/.env ]; then
-    grep -v "^BROADCAST_REGISTRY_" /opt/broadcast/.env > /opt/broadcast/.env.tmp || true
-    mv /opt/broadcast/.env.tmp /opt/broadcast/.env
+    grep -v "^BROADCAST_REGISTRY_" /opt/broadcast/.env > "$env_tmp" || true
   fi
-  echo "BROADCAST_REGISTRY_URL=$registry_url" >> /opt/broadcast/.env
-  echo "BROADCAST_REGISTRY_LOGIN=$registry_login" >> /opt/broadcast/.env
-  echo "BROADCAST_REGISTRY_PASSWORD=$registry_password" >> /opt/broadcast/.env
+  echo "BROADCAST_REGISTRY_URL=$registry_url" >> "$env_tmp"
+  echo "BROADCAST_REGISTRY_LOGIN=$registry_login" >> "$env_tmp"
+  echo "BROADCAST_REGISTRY_PASSWORD=$registry_password" >> "$env_tmp"
+  (umask 077 && cat "$env_tmp" > /opt/broadcast/.env)
+  rm -f "$env_tmp"
+  chmod 600 /opt/broadcast/.env
 
   print_license_summary "$response" "$domain"
 

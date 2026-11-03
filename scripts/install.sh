@@ -120,6 +120,8 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
     echo "app/.env already exists. Skipping creation."
   else
     echo "Creating app/.env..."
+    # Readable by their owner only from the start (see secure_env_files)
+    (umask 077 && touch /opt/broadcast/app/.env /opt/broadcast/db/.env)
 
     # Set some app environment variables
     local postgres_user="broadcast"
@@ -202,6 +204,8 @@ EOF
   sudo chown -R broadcast:broadcast /opt/broadcast
   # Re-assert container-writable dirs after the broad chown (see common.sh)
   chown_container_writable_dirs || true
+  # The env files hold secrets: readable by their owner only (see common.sh)
+  secure_env_files
   # Ensure db/init-scripts is readable by the postgres container (runs as uid 70)
   sudo chmod -R o+rX /opt/broadcast/db/init-scripts
 
