@@ -346,7 +346,8 @@ scenario_interactive() {
 
     log_test "(a) interactive install over a real TTY: ssh -t 'curl | sudo bash -s -- --no-reboot'"
     local transcript="$VAGRANT_DIR/interactive-transcript.log" rc
-    # log_user 0: expect does not copy the session to stdout. The TTY echoes
+    # log_user 0: expect does not copy the session to stdout; log_file -a
+    # still records it (without -a it records nothing). The TTY echoes
     # the typed key and the confirmation prompt repeats it; the transcript
     # file is masked right after the session (smoke_redact_file), and only
     # its masked tail is printed.
@@ -354,7 +355,7 @@ scenario_interactive() {
     expect <<'EXPECT'
 set timeout 2400
 log_user 0
-log_file -noappend $env(E2E_LOG)
+log_file -a -noappend $env(E2E_LOG)
 spawn ssh -F $env(E2E_SSH_CFG) -tt default "curl -fsSL $env(E2E_URL) | sudo BROADCAST_REF=$env(E2E_REF) bash -s -- --no-reboot"
 expect {
   "enter the domain name" { send "not a domain\r" }
@@ -398,6 +399,8 @@ EXPECT
     rc=$?
     smoke_redact_vm_secrets
     smoke_redact_file "$transcript"
+    log_info "license key prompts as recorded (masked):"
+    tr -d '\r' < "$transcript" | grep -i -E 'license key|Install Broadcast for' | sed 's/^/    | /'
     tr -d '\r' < "$transcript" | grep -v '^\s*$' | tail -30 | sed 's/^/    | /'
     if [ "$rc" = "0" ]; then log_success "interactive install exited 0"; else log_fail "interactive install failed (expect rc $rc)"; fi
 

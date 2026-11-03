@@ -72,6 +72,17 @@ test_every_smoke_script_uses_the_shared_helper() {
     assert_not_equals "0" "$found" "smoke scripts found"
 }
 
+# expect with "log_user 0" writes nothing to log_file unless log_file has -a: the interactive
+# scenario then saves an empty transcript and its prompt checks fail
+test_expect_transcripts_are_recorded_when_stdout_is_off() {
+    local script
+    for script in "$SMOKE_DIR"/*.sh; do
+        if /usr/bin/grep -q '^log_user 0' "$script" && ! /usr/bin/grep -q '^log_file -a ' "$script"; then
+            assert_equals "log_file -a" "log_file without -a" "$(basename "$script"): log_user 0 needs log_file -a"
+        fi
+    done
+}
+
 test_generated_vagrantfile_carries_the_port_patch() {
     load_helper || return 1
     local dir version extra patch_line configure_line
@@ -207,6 +218,7 @@ run_smoke_harness_tests() {
     init_test_framework
 
     run_test "test_every_smoke_script_uses_the_shared_helper" test_every_smoke_script_uses_the_shared_helper
+    run_test "test_expect_transcripts_are_recorded_when_stdout_is_off" test_expect_transcripts_are_recorded_when_stdout_is_off
     run_test "test_generated_vagrantfile_carries_the_port_patch" test_generated_vagrantfile_carries_the_port_patch
     run_test "test_redacts_the_key_in_plain_output" test_redacts_the_key_in_plain_output
     run_test "test_redacts_the_tty_echo_of_the_key" test_redacts_the_tty_echo_of_the_key
