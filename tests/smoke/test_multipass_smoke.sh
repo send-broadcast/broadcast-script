@@ -18,11 +18,17 @@
 #   ./tests/smoke/test_multipass_smoke.sh --no-cleanup    # Keep VM for debugging
 #   ./tests/smoke/test_multipass_smoke.sh --test-reboot   # Verify reboot recovery
 #   ./tests/smoke/test_multipass_smoke.sh --verbose       # Show all command output
+#
+# The Vagrantfile, the ssh helpers and the redaction come from lib/smoke_vm.sh
+# (shared with test_bootstrap_e2e.sh). Everything this script prints has the
+# license key, the registry login and the VM's other secrets masked.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
+# shellcheck source=lib/smoke_vm.sh
+source "$SCRIPT_DIR/lib/smoke_vm.sh"
 
 # Canonical repo URL — the test clones this by default so it exercises
 # what real end users actually install.
@@ -91,23 +97,23 @@ log_warn() {
     echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
-# Run a command on the VM as root via vagrant ssh
+# Run a command on the VM as root (smoke_root: plain ssh, the command base64-encoded, so quotes
+# in it arrive as written)
 vm_exec_root() {
     local cmd="$1"
     if [ "$FLAG_VERBOSE" = true ]; then
-        cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c '$cmd'" 2>&1
+        smoke_root "$cmd" 2>&1
     else
-        cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c '$cmd'" 2>/dev/null
+        smoke_root "$cmd" 2>/dev/null
     fi
 }
 
 # Runs SQL against a database in the postgres container.
 #
-# The SQL is base64-encoded on the host because vm_exec_root wraps its command
-# in single quotes (`sudo bash -c '<cmd>'`), so a single quote anywhere in the
-# SQL ends that quoting and corrupts the statement. Every string literal needs
-# one, so passing SQL inline silently produced `VALUES (Worker, ...)` — a bare
-# identifier — and postgres rejected it. base64 is quote-free by construction.
+# The SQL is base64-encoded on the host and fed to psql on stdin. vm_exec_root
+# once wrapped its command in single quotes, which turned string literals into
+# bare identifiers (`VALUES (Worker, ...)`); it now carries quotes intact, and
+# the encoding stays as the safe way to pass a whole SQL program.
 vm_psql() {
     local database="$1" sql="$2" b64
     b64=$(printf '%s' "$sql" | base64 | tr -d '\n')
@@ -115,8 +121,7 @@ vm_psql() {
 }
 
 # Runs Ruby inside the app container through `rails runner -` (reads the
-# program from stdin). base64 for the same reason as vm_psql: vm_exec_root
-# wraps its command in single quotes.
+# program from stdin), base64-encoded like vm_psql.
 #
 # vm_rails_runner <ruby>
 # vm_rails_runner_timeout <seconds> <ruby>   -> exit 124 when it did not finish
@@ -214,6 +219,11 @@ fetch_registry_credentials() {
     log_info "Registry credentials fetched successfully."
 }
 
+# The license key and the registry login are masked in everything printed from here on
+register_secrets() {
+    smoke_redact_add "$BROADCAST_LICENSE_KEY" "$BROADCAST_REGISTRY_LOGIN" "$BROADCAST_REGISTRY_PASSWORD"
+}
+
 #######################
 # Cleanup
 #######################
@@ -249,78 +259,29 @@ setup_vm() {
         exit 1
     fi
 
-    # Create Vagrant working directory
-    mkdir -p "$VAGRANT_DIR"
-
-    # Detect host arch and pick QEMU machine flags. macOS uses Apple's HVF
-    # accelerator on both Apple Silicon (aarch64) and Intel (x86_64).
-    local host_arch qemu_arch qemu_machine qemu_ssh_port
-    host_arch=$(uname -m)
-    if [ "$host_arch" = "arm64" ] || [ "$host_arch" = "aarch64" ]; then
-        qemu_arch="aarch64"
-        qemu_machine="virt,accel=hvf,highmem=on"
-    else
-        qemu_arch="x86_64"
-        qemu_machine="q35,accel=hvf"
-    fi
-
     # Derive a per-version SSH port so back-to-back runs don't collide on the
     # vagrant-qemu default (50022). Major version offset: 24.04 -> 50024, 26.04 -> 50026.
+    local qemu_ssh_port extra
     qemu_ssh_port=$((50000 + ${UBUNTU_VERSION%%.*}))
 
-    # Generate Vagrantfile — provisioning differs depending on whether we are
-    # cloning the canonical remote (default) or copying the local working tree.
+    # Provisioning differs depending on whether we are cloning the canonical
+    # remote (default) or copying the local working tree.
     if [ "$FLAG_LOCAL" = true ]; then
         log_info "Repo source: local working tree ($PROJECT_ROOT)"
-        cat > "$VAGRANT_DIR/Vagrantfile" <<'VAGRANTEOF'
-Vagrant.configure("2") do |config|
-  config.vm.box = "cloud-image/ubuntu-UBUNTU_VERSION_PLACEHOLDER"
-  config.vm.hostname = "broadcast-smoke-test"
-
-  config.vm.provider "qemu" do |qe|
-    qe.arch = "QEMU_ARCH_PLACEHOLDER"
-    qe.machine = "QEMU_MACHINE_PLACEHOLDER"
-    qe.cpu = "host"
-    qe.smp = "cpus=2,sockets=1,cores=2,threads=1"
-    qe.memory = "2048M"
-    qe.net_device = "virtio-net-pci"
-    qe.ssh_port = "QEMU_SSH_PORT_PLACEHOLDER"
-  end
-
-  # Disable the default /vagrant share — QEMU does not support virtfs by default
-  config.vm.synced_folder ".", "/vagrant", disabled: true
-
+        extra=$(cat <<VAGRANTEOF
   # Share local working tree via rsync (cloud-image boxes have rsync preinstalled)
-  config.vm.synced_folder "BROADCAST_REPO_PATH", "/tmp/broadcast-repo", type: "rsync"
+  config.vm.synced_folder "${PROJECT_ROOT}", "/tmp/broadcast-repo", type: "rsync"
 
   config.vm.provision "shell", inline: <<-SHELL
     rm -rf /opt/broadcast
     mkdir -p /opt/broadcast
     cp -a /tmp/broadcast-repo/. /opt/broadcast/
   SHELL
-end
 VAGRANTEOF
-        sed -i '' "s|BROADCAST_REPO_PATH|${PROJECT_ROOT}|" "$VAGRANT_DIR/Vagrantfile"
+)
     else
         log_info "Repo source: ${BROADCAST_REPO_URL}"
-        cat > "$VAGRANT_DIR/Vagrantfile" <<'VAGRANTEOF'
-Vagrant.configure("2") do |config|
-  config.vm.box = "cloud-image/ubuntu-UBUNTU_VERSION_PLACEHOLDER"
-  config.vm.hostname = "broadcast-smoke-test"
-
-  config.vm.provider "qemu" do |qe|
-    qe.arch = "QEMU_ARCH_PLACEHOLDER"
-    qe.machine = "QEMU_MACHINE_PLACEHOLDER"
-    qe.cpu = "host"
-    qe.smp = "cpus=2,sockets=1,cores=2,threads=1"
-    qe.memory = "2048M"
-    qe.net_device = "virtio-net-pci"
-    qe.ssh_port = "QEMU_SSH_PORT_PLACEHOLDER"
-  end
-
-  # Disable the default /vagrant share — QEMU does not support virtfs by default
-  config.vm.synced_folder ".", "/vagrant", disabled: true
-
+        extra=$(cat <<VAGRANTEOF
   # Clone the canonical repo — matches what real end users install
   config.vm.provision "shell", inline: <<-SHELL
     set -e
@@ -329,21 +290,16 @@ Vagrant.configure("2") do |config|
       apt-get install -y -qq git
     fi
     rm -rf /opt/broadcast
-    git clone BROADCAST_REPO_URL_PLACEHOLDER /opt/broadcast
+    git clone ${BROADCAST_REPO_URL} /opt/broadcast
   SHELL
-end
 VAGRANTEOF
-        sed -i '' "s|BROADCAST_REPO_URL_PLACEHOLDER|${BROADCAST_REPO_URL}|" "$VAGRANT_DIR/Vagrantfile"
+)
     fi
-
-    sed -i '' "s|UBUNTU_VERSION_PLACEHOLDER|${UBUNTU_VERSION}|" "$VAGRANT_DIR/Vagrantfile"
-    sed -i '' "s|QEMU_ARCH_PLACEHOLDER|${qemu_arch}|" "$VAGRANT_DIR/Vagrantfile"
-    sed -i '' "s|QEMU_MACHINE_PLACEHOLDER|${qemu_machine}|" "$VAGRANT_DIR/Vagrantfile"
-    sed -i '' "s|QEMU_SSH_PORT_PLACEHOLDER|${qemu_ssh_port}|" "$VAGRANT_DIR/Vagrantfile"
+    smoke_write_vagrantfile "$VAGRANT_DIR" "$UBUNTU_VERSION" "$qemu_ssh_port" broadcast-smoke-test "$extra"
 
     # Launch VM (QEMU provider)
-    log_info "Launching Ubuntu ${UBUNTU_VERSION} VM (qemu/${qemu_arch}, ssh port ${qemu_ssh_port})..."
-    cd "$VAGRANT_DIR" && vagrant up --provider=qemu
+    log_info "Launching Ubuntu ${UBUNTU_VERSION} VM (qemu/${SMOKE_QEMU_ARCH}, ssh port ${qemu_ssh_port})..."
+    smoke_vagrant_up "$VAGRANT_DIR"
 
     log_info "VM is ready."
 }
@@ -419,18 +375,20 @@ run_installer() {
     local start_time=$(date +%s)
 
     if [ "$FLAG_VERBOSE" = true ]; then
-        cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c 'cd /opt/broadcast && BROADCAST_NO_REBOOT=1 ./broadcast.sh install'" 2>&1 || {
+        vm_exec_root "cd /opt/broadcast && BROADCAST_NO_REBOOT=1 ./broadcast.sh install" || {
             local exit_code=$?
             log_fail "Installer exited with code $exit_code"
             return $exit_code
         }
     else
-        cd "$VAGRANT_DIR" && vagrant ssh -c "sudo bash -c 'cd /opt/broadcast && BROADCAST_NO_REBOOT=1 ./broadcast.sh install'" >/dev/null 2>&1 || {
+        vm_exec_root "cd /opt/broadcast && BROADCAST_NO_REBOOT=1 ./broadcast.sh install" >/dev/null 2>&1 || {
             local exit_code=$?
             log_fail "Installer exited with code $exit_code"
             return $exit_code
         }
     fi
+    # The install wrote the database password and the Rails keys: mask them too
+    smoke_redact_vm_secrets
 
     local end_time=$(date +%s)
     local elapsed=$((end_time - start_time))
@@ -632,9 +590,6 @@ run_install_state_checks() {
     fi
 
     # Unattended upgrades configured, without automatic reboots.
-    # NOTE: vm_exec_root nests the command inside vagrant ssh -c + sudo bash
-    # -c '...', so patterns here must avoid quotes entirely — quoted patterns
-    # get mangled across the shell layers and fail spuriously.
     log_test "Unattended upgrades are configured"
     if vm_exec_root "grep -q APT::Periodic::Unattended-Upgrade /etc/apt/apt.conf.d/20auto-upgrades"; then
         log_success "unattended upgrades enabled"
@@ -703,8 +658,6 @@ run_install_state_checks() {
     # write each mount (uploads, the dashboard's upgrade trigger, Thruster's
     # certificate store) ...
     log_test "App container can write its bind mounts"
-    # vm_exec_root wraps the command in single quotes, so only double quotes
-    # can appear inside it; hence the spelled-out paths rather than a loop.
     if vm_exec_root "docker exec app sh -c \"touch /rails/storage/.smoke-write-test /rails/uploads/.smoke-write-test /rails/triggers/.smoke-write-test /rails/ssl/.smoke-write-test && rm /rails/storage/.smoke-write-test /rails/uploads/.smoke-write-test /rails/triggers/.smoke-write-test /rails/ssl/.smoke-write-test\""; then
         log_success "container wrote and removed a file in storage, uploads, triggers and ssl"
     else
@@ -955,7 +908,8 @@ test_reboot_recovery() {
     log_info "=== Phase 5: Reboot Recovery ==="
 
     log_info "Restarting VM..."
-    cd "$VAGRANT_DIR" && vagrant reload
+    (cd "$VAGRANT_DIR" && vagrant reload)
+    smoke_ssh_config "$VAGRANT_DIR"
 
     log_info "VM is back. Re-running health checks..."
     run_health_checks "Phase 5 (post-reboot)"
@@ -977,7 +931,8 @@ test_boot_registry_outage() {
     vm_exec_root "cp /etc/hosts /etc/hosts.smoke-backup && printf \"127.0.0.1 ${registry_host}\n\" >> /etc/hosts"
 
     log_info "Rebooting VM with the registry unreachable..."
-    cd "$VAGRANT_DIR" && vagrant reload
+    (cd "$VAGRANT_DIR" && vagrant reload)
+    smoke_ssh_config "$VAGRANT_DIR"
 
     log_test "broadcast.service becomes active from cached images (no registry)"
     if wait_for_check "broadcast.service active" \
@@ -988,8 +943,6 @@ test_boot_registry_outage() {
     fi
 
     log_test "no systemd start-rate-limit lockout during boot"
-    # Quote-free remote grep pattern: vm_exec_root's nested quoting mangles
-    # single-quoted arguments (see the 2026-08-01 smoke-test note).
     if vm_exec_root "journalctl -b -u broadcast --no-pager | grep -q too.quickly"; then
         log_fail "journal shows the rate-limit lockout (Start request repeated too quickly)"
     else
@@ -1500,8 +1453,7 @@ _test_streaming_lifecycle() {
 # Domain change — exercises the interactive change_installation_domain
 # command by feeding its prompts from a file. Runs LAST (it changes the
 # domain and restarts the stack; nothing after it depends on the old
-# domain). Commands stay quote-free: vm_exec_root's nested vagrant-ssh/sudo
-# quoting mangles quoted patterns.
+# domain).
 #######################
 
 test_domain_change() {
@@ -1738,9 +1690,12 @@ main() {
     echo "=========================================="
     echo ""
 
-    trap cleanup EXIT
+    trap 'cleanup; smoke_redact_cleanup' EXIT
 
+    # Everything printed from here on goes through the redaction filter
+    smoke_redact_output
     load_credentials
+    register_secrets
 
     for version in "${UBUNTU_VERSIONS[@]}"; do
         run_for_version "$version"

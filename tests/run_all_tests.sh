@@ -148,6 +148,7 @@ run_unit_tests() {
     run_test_suite "Optional Service Commands" "$SCRIPT_DIR/unit/test_plugins.sh"
     run_test_suite "Optional Runtime Profile" "$SCRIPT_DIR/unit/test_optional_runtime_profile.sh"
     run_test_suite "Env File Modes" "$SCRIPT_DIR/unit/test_env_file_modes.sh"
+    run_test_suite "Smoke Test Harness (Vagrantfile, redaction)" "$SCRIPT_DIR/unit/test_smoke_harness.sh"
 }
 
 # Run integration tests
