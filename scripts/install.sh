@@ -167,6 +167,8 @@ Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/20
   # must happen BEFORE the service starts below, see common.sh. A failure is
   # printed there; the install carries on so the operator sees it in context.
   chown_container_writable_dirs || true
+  # The env files: broadcast:broadcast, mode 600, before the first start (see common.sh)
+  secure_env_files
 
   load_registry_info
   registry_login "$BROADCAST_REGISTRY_URL" "$BROADCAST_REGISTRY_LOGIN" "$BROADCAST_REGISTRY_PASSWORD"

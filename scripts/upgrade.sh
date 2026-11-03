@@ -208,6 +208,10 @@ function _upgrade_continue() {
   echo -e "\e[33mSetting Docker image for version $target_version...\e[0m"
   set_docker_image "$target_version"
 
+  # The env files: broadcast:broadcast, mode 600 (see common.sh). Before the pull: it runs Compose
+  # as the broadcast user, which reads them, and so does the start below.
+  secure_env_files
+
   # Upgrade the Broadcast containers
   echo -e "\e[33mPulling Broadcast containers for version $target_version...\e[0m"
   su - broadcast -c 'cd /opt/broadcast && set -a && source .image && set +a && docker compose pull'
@@ -219,9 +223,6 @@ function _upgrade_continue() {
   # servers pick fixes up, so re-assert it here on every upgrade. Only paths
   # with the wrong owner are touched, so this is cheap once things are right.
   chown_container_writable_dirs || true
-
-  # The env files hold secrets: readable by their owner only (see common.sh)
-  secure_env_files
 
   echo -e "\e[33mRestarting Broadcast service...\e[0m"
   systemctl start broadcast

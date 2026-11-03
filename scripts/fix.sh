@@ -166,6 +166,11 @@ function fix() {
     fix_did "restored broadcast:broadcast ownership of /opt/broadcast"
   fi
 
+  # The env files: broadcast:broadcast, mode 600, before anything below starts the service. The
+  # service reads them as the broadcast user; secure_env_files warns about any file it leaves as it was.
+  secure_env_files
+  fix_ok "env files checked (owner broadcast, mode 600)"
+
   # The app/job containers run as uid 1000 (image: USER 1000:1000) and WRITE
   # the bind-mounted app data dirs. The broad chown above hands them to the
   # host broadcast user, whose uid matches 1000 only by luck — on hosts

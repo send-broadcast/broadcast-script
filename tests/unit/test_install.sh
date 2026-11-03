@@ -114,8 +114,11 @@ test_load_registry_info_keeps_spaces_and_equals_signs() {
 
 # The env files hold the registry login, the database password and the Rails keys. install must
 # leave them readable by the broadcast user only (it runs docker compose, which reads them).
+# Files the installer creates belong to root; the service must still start, during the install and
+# with a restart right after it.
 test_install_leaves_the_env_files_readable_by_their_owner_only() {
-    harness_fake_ownership
+    harness_fake_ownership root:root
+    harness_service_reads_env_files
     /bin/chmod 644 "$SANDBOX_ROOT/.env"
     run_install "umask 022" >/dev/null
 
@@ -123,6 +126,10 @@ test_install_leaves_the_env_files_readable_by_their_owner_only() {
     for f in .env app/.env db/.env; do
         assert_equals "broadcast:broadcast 600" "$(harness_owner_and_mode "$SANDBOX_ROOT/$f")" "install must leave $f at mode 600"
     done
+    assert_file_not_exists "$SANDBOX_ROOT/.service_failed" "every start during the install must work"
+    local rc=0
+    sandbox_run "systemctl restart broadcast" >/dev/null || rc=$?
+    assert_equals "0" "$rc" "a restart right after the install must work"
 }
 
 test_fail2ban_checksum_mismatch_stops_the_install() {

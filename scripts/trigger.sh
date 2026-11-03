@@ -72,6 +72,8 @@ function trigger() {
     chown -R broadcast:broadcast /opt/broadcast
     # Re-assert container-writable dirs after the broad chown (see common.sh)
     chown_container_writable_dirs || true
+    # The env files: broadcast:broadcast, mode 600 (see common.sh)
+    secure_env_files
 
     echo "[$(date)] domains updated, restarting services"
 

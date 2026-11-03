@@ -106,6 +106,8 @@ exit 0'
 esac
 exit 0'
     harness_mock su 'exit 0'
+    # runuser: the broadcast user can read every file (harness_fake_ownership models it)
+    harness_mock runuser 'exit 0'
     harness_mock chown 'exit 0'
     harness_mock apt-get 'exit 0'
     harness_mock sleep 'exit 0'
@@ -141,16 +143,25 @@ MOCK
     chmod +x "$SANDBOX_ROOT/mocks/grep"
 }
 
-# harness_fake_ownership
+# harness_fake_ownership [default owner]
 # The sandbox runs unprivileged, so a real chown to uid 1000 or to the broadcast user fails. This
 # replaces chown with a recorder and stat with a reader of those records, so a test can assert who
 # owns a file after a sequence of chowns:
-#   chown [-R] OWNER PATH...   records OWNER for each PATH (with -R, for everything below it too)
-#   stat -c FORMAT PATH        %U %u = the user, %G %g = the group of the last record that covers
-#                              PATH ("dev" when none does); %a = the real mode; %i = the real inode
+#   chown [-R] OWNER PATH...   records OWNER for the file (by inode, so it moves with an mv); with
+#                              -R for everything below PATH too. A path that matches the glob in
+#                              FAKE_CHOWN_FAILS fails like a chown on an immutable file.
+#   stat -c FORMAT PATH        %U %u = the user, %G %g = the group of the last record for the file
+#                              (the default owner when there is none: a file that the scripts
+#                              create runs as root on a server); %a = the real mode; %i = the inode
 #   chmod                      real, but only for paths inside the sandbox
+#   runuser -u USER -- test -r PATH
+#                              answers from the recorded owner and the real mode, as the kernel
+#                              would (root reads all); FAKE_RUNUSER_DENY=1 makes every check fail
+# A test may also append "R<TAB>OWNER<TAB>PATH" to .fake_owners: it covers PATH and everything
+# below it, also files created later.
 harness_fake_ownership() {
     : > "$SANDBOX_ROOT/.fake_owners"
+    echo "${1:-dev:dev}" > "$SANDBOX_ROOT/.fake_default_owner"
     harness_mock chown 'recursive=-
 args=()
 for a in "$@"; do
@@ -161,7 +172,22 @@ for a in "$@"; do
   esac
 done
 for p in "${args[@]:1}"; do
-  printf "%s\t%s\t%s\n" "$recursive" "${args[0]}" "$p" >> "$BROADCAST_ROOT/.fake_owners"
+  if [ -n "${FAKE_CHOWN_FAILS:-}" ]; then
+    case "$p" in
+      $FAKE_CHOWN_FAILS) echo "chown: changing ownership of $p: Operation not permitted" >&2; exit 1 ;;
+    esac
+  fi
+  if [ ! -e "$p" ]; then
+    printf -- "-\t%s\t%s\t\n" "${args[0]}" "$p" >> "$BROADCAST_ROOT/.fake_owners"
+    continue
+  fi
+  if [ "$recursive" = R ]; then
+    find "$p" -print
+  else
+    printf "%s\n" "$p"
+  fi | while IFS= read -r f; do
+    printf -- "-\t%s\t%s\t%s\n" "${args[0]}" "$f" "$(ls -id "$f" | awk "{ print \$1 }")" >> "$BROADCAST_ROOT/.fake_owners"
+  done
 done
 exit 0'
     harness_mock stat 'fmt="" path=""
@@ -172,12 +198,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -e "$path" ] || { echo "stat: cannot stat $path" >&2; exit 1; }
-owner=$(awk -F "\t" -v p="$path" "(\$3 == p) || (\$1 == \"R\" && index(p, \$3 \"/\") == 1) { o = \$2 } END { print o }" "$BROADCAST_ROOT/.fake_owners")
-[ -n "$owner" ] || owner="dev:dev"
+inode=$(ls -id "$path" | awk "{ print \$1 }")
+owner=$(awk -F "\t" -v p="$path" -v i="$inode" "(\$4 != \"\" && \$4 == i) || (\$4 == \"\" && ((\$3 == p) || (\$1 == \"R\" && index(p, \$3 \"/\") == 1))) { o = \$2 } END { print o }" "$BROADCAST_ROOT/.fake_owners")
+[ -n "$owner" ] || owner=$(cat "$BROADCAST_ROOT/.fake_default_owner" 2>/dev/null || echo dev:dev)
 user="${owner%%:*}"
 group="${owner#*:}"
 mode=$(/usr/bin/stat -c %a "$path" 2>/dev/null || /usr/bin/stat -f %Lp "$path")
-inode=$(ls -id "$path" | awk "{ print \$1 }")
 out="$fmt"
 out="${out//%U/$user}"; out="${out//%u/$user}"
 out="${out//%G/$group}"; out="${out//%g/$group}"
@@ -189,11 +215,80 @@ case "$last" in
   "$BROADCAST_ROOT"/*) exec /bin/chmod "$@" ;;
 esac
 exit 0'
+    # Not on the calls log: the permission check that runuser and the service mock share
+    cat > "$SANDBOX_ROOT/mocks/.fake_can_read" <<'CHECK'
+#!/bin/bash
+# .fake_can_read USER PATH: 0 when USER could open PATH for reading (owner, then group, then other)
+user="$1" path="$2"
+[ -e "$path" ] || exit 1
+[ "$user" = root ] && exit 0
+read -r og mode <<< "$("$(dirname "$0")/stat" -c "%U:%G %a" "$path")"
+mode=$(printf "%03d" "$mode")
+u="${og%%:*}" g="${og#*:}"
+if [ "$u" = "$user" ]; then bits=${mode: -3:1}
+elif [ "$g" = "$user" ]; then bits=${mode: -2:1}
+else bits=${mode: -1}
+fi
+(( bits & 4 ))
+CHECK
+    chmod +x "$SANDBOX_ROOT/mocks/.fake_can_read"
+    harness_mock runuser 'user=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -u) user="$2"; shift 2 ;;
+    --) shift; break ;;
+    *) shift ;;
+  esac
+done
+[ -z "${FAKE_RUNUSER_DENY:-}" ] || exit 1
+if [ "${1:-}" = test ] && [ "${2:-}" = -r ]; then
+  exec "$(dirname "$0")/.fake_can_read" "$user" "$3"
+fi
+exec "$@"'
 }
 
 # harness_owner_and_mode <path>: "<user>:<group> <mode>" as the fake ownership records it
 harness_owner_and_mode() {
     BROADCAST_ROOT="$SANDBOX_ROOT" "$SANDBOX_ROOT/mocks/stat" -c "%u:%g %a" "$1"
+}
+
+# harness_service_reads_env_files
+# broadcast.service runs `docker compose` as the broadcast user, and Compose reads .env, app/.env
+# and db/.env. With this, `systemctl start|restart broadcast` fails, like Compose with "permission
+# denied", when the broadcast user cannot read one of them (needs harness_fake_ownership). So does
+# `su - broadcast -c '... docker compose ...'` (the upgrade's pull); it records .compose_failed.
+harness_service_reads_env_files() {
+    harness_mock su 'case "$*" in
+  *"docker compose"*)
+    for f in "$BROADCAST_ROOT/.env" "$BROADCAST_ROOT/app/.env" "$BROADCAST_ROOT/db/.env"; do
+      [ -e "$f" ] || continue
+      if ! "$BROADCAST_ROOT/mocks/.fake_can_read" broadcast "$f"; then
+        echo "docker compose: open $f: permission denied" >&2
+        echo "$f" >> "$BROADCAST_ROOT/.compose_failed"
+        exit 1
+      fi
+    done
+    ;;
+esac
+exit 0'
+    harness_mock systemctl 'case "${1:-}" in
+  is-enabled) exit "${SYSTEMCTL_IS_ENABLED_RC:-0}" ;;
+  start|restart)
+    case "${2:-}" in
+      broadcast|broadcast.service)
+        for f in "$BROADCAST_ROOT/.env" "$BROADCAST_ROOT/app/.env" "$BROADCAST_ROOT/db/.env"; do
+          [ -e "$f" ] || continue
+          if ! "$BROADCAST_ROOT/mocks/.fake_can_read" broadcast "$f"; then
+            echo "broadcast.service: open $f: permission denied" >&2
+            echo "$f" >> "$BROADCAST_ROOT/.service_failed"
+            exit 1
+          fi
+        done
+        ;;
+    esac
+    ;;
+esac
+exit 0'
 }
 
 harness_mock_uname_arm64() {
