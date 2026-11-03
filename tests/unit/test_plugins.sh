@@ -81,6 +81,68 @@ test_ensure_secret_creates_64_hex_characters_once() {
     assert_equals "$secret" "$(cat "$SANDBOX_ROOT/secrets/plugin_runtime_secret")" "an existing secret must be kept"
 }
 
+# .env holds the registry password. safe-mode must change one line and keep the file itself: a
+# replaced file belongs to root (the scripts run as root) and gets the default mode. The same inode
+# shows the file was rewritten in place, so its owner did not change.
+assert_safe_mode_keeps_the_env_file() {
+    local value="$1" before after
+    harness_fake_ownership
+    printf 'BROADCAST_REGISTRY_URL=r.example\nBROADCAST_REGISTRY_PASSWORD=pw\n' > "$SANDBOX_ROOT/.env"
+    /bin/chmod 640 "$SANDBOX_ROOT/.env"
+    before=$("$SANDBOX_ROOT/mocks/stat" -c "%i %a" "$SANDBOX_ROOT/.env")
+
+    sandbox_run "plugins safe-mode $value" >/dev/null
+
+    after=$("$SANDBOX_ROOT/mocks/stat" -c "%i %a" "$SANDBOX_ROOT/.env")
+    assert_equals "$before" "$after" "safe-mode $value must keep the inode (owner) and the mode of .env"
+    assert_contains "$(cat "$SANDBOX_ROOT/.env")" "BROADCAST_REGISTRY_PASSWORD=pw" "the registry login must stay"
+}
+
+test_safe_mode_on_keeps_the_owner_and_mode_of_env() {
+    assert_safe_mode_keeps_the_env_file on
+}
+
+test_safe_mode_off_keeps_the_owner_and_mode_of_env() {
+    assert_safe_mode_keeps_the_env_file off
+}
+
+# An existing secret with the wrong owner (a broad chown -R of /opt/broadcast) or mode must be
+# repaired: the containers read it as uid 1000, and ensure_plugin_runtime_secret used to return as
+# soon as the file existed.
+wrong_owner_secret() {
+    harness_fake_ownership
+    mkdir -p "$SANDBOX_ROOT/secrets"
+    echo "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" > "$SANDBOX_ROOT/secrets/plugin_runtime_secret"
+    /bin/chmod 644 "$SANDBOX_ROOT/secrets/plugin_runtime_secret"
+    printf "R\tbroadcast:broadcast\t%s\n" "$SANDBOX_ROOT" >> "$SANDBOX_ROOT/.fake_owners"
+}
+
+test_upgrade_repairs_the_owner_and_mode_of_an_existing_secret() {
+    wrong_owner_secret
+    echo "2.0.0" > "$SANDBOX_ROOT/.current_version"
+    echo "DOCKER_IMAGE=gitea.hostedapp.org/broadcast/broadcast:2.52.1" > "$SANDBOX_ROOT/.image"
+    touch "$SANDBOX_ROOT/app/.env"
+    harness_mock crontab 'exit 0'
+    local rc=0
+    sandbox_run "_upgrade_continue 2.52.1" >/dev/null || rc=$?
+
+    assert_equals "0" "$rc" "the upgrade should succeed"
+    assert_equals "1000:1000 400" "$(harness_owner_and_mode "$SANDBOX_ROOT/secrets/plugin_runtime_secret")" \
+        "upgrade must give the secret back to the container uid with mode 0400"
+    assert_equals "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" \
+        "$(cat "$SANDBOX_ROOT/secrets/plugin_runtime_secret")" "the secret itself must not change"
+}
+
+test_update_repairs_the_owner_and_mode_of_an_existing_secret() {
+    wrong_owner_secret
+    local rc=0
+    sandbox_run "update" >/dev/null || rc=$?
+
+    assert_equals "0" "$rc" "the update should succeed"
+    assert_equals "1000:1000 400" "$(harness_owner_and_mode "$SANDBOX_ROOT/secrets/plugin_runtime_secret")" \
+        "the nightly update must give the secret back to the container uid with mode 0400"
+}
+
 test_main_routes_plugins_with_arguments() {
     local output
     output=$(sandbox_run "$GUARD_STUBS
@@ -133,6 +195,10 @@ run_plugins_tests() {
     run_test "test_safe_mode_status_reads_the_file" test_safe_mode_status_reads_the_file
     run_test "test_unknown_subcommand_shows_usage" test_unknown_subcommand_shows_usage
     run_test "test_ensure_secret_creates_64_hex_characters_once" test_ensure_secret_creates_64_hex_characters_once
+    run_test "test_safe_mode_on_keeps_the_owner_and_mode_of_env" test_safe_mode_on_keeps_the_owner_and_mode_of_env
+    run_test "test_safe_mode_off_keeps_the_owner_and_mode_of_env" test_safe_mode_off_keeps_the_owner_and_mode_of_env
+    run_test "test_upgrade_repairs_the_owner_and_mode_of_an_existing_secret" test_upgrade_repairs_the_owner_and_mode_of_an_existing_secret
+    run_test "test_update_repairs_the_owner_and_mode_of_an_existing_secret" test_update_repairs_the_owner_and_mode_of_an_existing_secret
     run_test "test_main_routes_plugins_with_arguments" test_main_routes_plugins_with_arguments
     run_test "test_help_mentions_plugins" test_help_mentions_plugins
     run_test "test_logs_accepts_plugins_and_egress" test_logs_accepts_plugins_and_egress

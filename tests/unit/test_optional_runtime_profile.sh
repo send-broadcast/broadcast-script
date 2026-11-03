@@ -171,6 +171,73 @@ test_update_checks_the_image_after_it_pulls_new_scripts() {
         "the nightly update delivers the compose file, so it must set the profile for the current image"
 }
 
+# broadcast.sh loads update() before `git pull`, so the steps after the pull used to run the code
+# from before the pull: the first nightly update that delivered the sync did not run it, and an
+# affected server kept its restart loop for one more night. Here the loaded update.sh is the old
+# code (no sync); the pull brings the current update.sh. The sync must run in the same update.
+#
+# The re-exec target is the real broadcast.sh main(), with the root, domain and license guards
+# stubbed; it sources the scripts from disk, as broadcast.sh does after a pull.
+install_reexec_target() {
+    cat > "$SANDBOX_ROOT/broadcast.sh" <<TARGET
+#!/bin/bash
+set -e
+set -u
+echo "broadcast.sh \$* BROADCAST_UPDATE_REEXEC=\${BROADCAST_UPDATE_REEXEC:-}" >> "$SANDBOX_CALLS"
+source "$SANDBOX_ROOT/broadcast_functions.sh"
+for s in $HARNESS_SCRIPTS; do
+    source "$SANDBOX_ROOT/scripts/\$s"
+done
+includeDependencies() { :; }
+check_root() { :; }
+check_installation_domain() { :; }
+check_license() { :; }
+main "\$@"
+TARGET
+    chmod +x "$SANDBOX_ROOT/broadcast.sh"
+}
+
+test_update_runs_the_pulled_code_after_the_pull() {
+    cp "$SANDBOX_ROOT/scripts/update.sh" "$SANDBOX_ROOT/pulled-update.sh"
+    /usr/bin/grep -v "sync_plugin_runtime_profile" "$SANDBOX_ROOT/pulled-update.sh" > "$SANDBOX_ROOT/scripts/update.sh"
+    harness_mock git "if [ \"\${1:-}\" = \"pull\" ]; then cp \"$SANDBOX_ROOT/pulled-update.sh\" \"$SANDBOX_ROOT/scripts/update.sh\"; fi
+exit 0"
+    install_reexec_target
+
+    local output rc=0
+    output=$(sandbox_run "update" "export IMAGE_HAS_RUNTIME_RC=1") || rc=$?
+
+    assert_equals "0" "$rc" "the update should succeed"
+    harness_assert_call_order \
+        "git pull" \
+        "docker run --rm --pull never --entrypoint test gitea.hostedapp.org/broadcast/broadcast:2.52.1 -x /rails/bin/plugin-runtime"
+    harness_assert_called "docker rm -f plugins egress" "the first update with the sync must stop the restart loop"
+}
+
+test_update_runs_the_pulled_code_only_once() {
+    install_reexec_target
+
+    local rc=0
+    sandbox_run "update" "export IMAGE_HAS_RUNTIME_RC=1" >/dev/null || rc=$?
+
+    assert_equals "0" "$rc" "the update should succeed"
+    assert_equals "1" "$(/usr/bin/grep -c '^git pull' "$SANDBOX_CALLS")" "the scripts must be pulled once"
+    assert_equals "1" "$(/usr/bin/grep -c '^broadcast.sh ' "$SANDBOX_CALLS")" "broadcast.sh must be started again once, not in a loop"
+    assert_equals "1" "$(/usr/bin/grep -c -- '--entrypoint test' "$SANDBOX_CALLS")" "the steps after the pull must run once"
+}
+
+test_update_does_not_start_broadcast_sh_again_when_it_was_started_by_an_update() {
+    harness_stub_broadcast_sh
+
+    local rc=0
+    sandbox_run "update" "export IMAGE_HAS_RUNTIME_RC=1
+export BROADCAST_UPDATE_REEXEC=1" >/dev/null || rc=$?
+
+    assert_equals "0" "$rc" "the update should succeed"
+    harness_assert_not_called "broadcast.sh" "a second start of broadcast.sh would loop"
+    harness_assert_called "--entrypoint test" "the steps after the pull must still run"
+}
+
 test_safe_mode_does_not_start_the_runtime_when_the_profile_is_off() {
     local rc=0
     sandbox_run "plugins safe-mode on" >/dev/null || rc=$?
@@ -206,6 +273,9 @@ run_optional_runtime_profile_tests() {
     run_test "test_upgrade_on_an_image_with_the_binary_turns_the_runtime_on" test_upgrade_on_an_image_with_the_binary_turns_the_runtime_on
     run_test "test_install_checks_the_image_after_the_pull_and_before_the_start" test_install_checks_the_image_after_the_pull_and_before_the_start
     run_test "test_update_checks_the_image_after_it_pulls_new_scripts" test_update_checks_the_image_after_it_pulls_new_scripts
+    run_test "test_update_runs_the_pulled_code_after_the_pull" test_update_runs_the_pulled_code_after_the_pull
+    run_test "test_update_runs_the_pulled_code_only_once" test_update_runs_the_pulled_code_only_once
+    run_test "test_update_does_not_start_broadcast_sh_again_when_it_was_started_by_an_update" test_update_does_not_start_broadcast_sh_again_when_it_was_started_by_an_update
     run_test "test_safe_mode_does_not_start_the_runtime_when_the_profile_is_off" test_safe_mode_does_not_start_the_runtime_when_the_profile_is_off
     run_test "test_logs_for_the_runtime_do_not_fail_when_the_profile_is_off" test_logs_for_the_runtime_do_not_fail_when_the_profile_is_off
 

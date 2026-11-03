@@ -230,6 +230,10 @@ main() {
     update)
       update
       ;;
+    _update_continue)
+      # Internal command: update runs the steps after its git pull with the pulled scripts
+      _update_continue
+      ;;
     restart)
       restart
       ;;

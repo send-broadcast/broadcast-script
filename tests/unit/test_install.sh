@@ -112,6 +112,19 @@ test_load_registry_info_keeps_spaces_and_equals_signs() {
     assert_equals "[$REGISTRY_PASSWORD]" "$output" "the value must be exported unchanged"
 }
 
+# The containers read the runtime secret as uid 1000, and the file is mode 0400. install creates it,
+# then hands /opt/broadcast to the broadcast user with a broad chown -R. On a host where the
+# broadcast user is not uid 1000 (uid 1000 is often vagrant or ubuntu), the containers then could
+# not read it.
+test_install_leaves_the_runtime_secret_owned_by_the_container_uid() {
+    harness_fake_ownership
+    run_install >/dev/null
+
+    assert_file_exists "$SANDBOX_ROOT/secrets/plugin_runtime_secret" "install must create the secret"
+    assert_equals "1000:1000 400" "$(harness_owner_and_mode "$SANDBOX_ROOT/secrets/plugin_runtime_secret")" \
+        "after every chown of the install, the secret must belong to the container uid with mode 0400"
+}
+
 test_fail2ban_checksum_mismatch_stops_the_install() {
     local output rc=0
     output=$(run_install "export MOCK_SHA_RC=1") || rc=$?
@@ -201,6 +214,7 @@ run_install_tests() {
     run_test "test_registry_password_never_appears_in_a_command_line" test_registry_password_never_appears_in_a_command_line
     run_test "test_load_registry_info_keeps_spaces_and_equals_signs" test_load_registry_info_keeps_spaces_and_equals_signs
     run_test "test_fail2ban_checksum_mismatch_stops_the_install" test_fail2ban_checksum_mismatch_stops_the_install
+    run_test "test_install_leaves_the_runtime_secret_owned_by_the_container_uid" test_install_leaves_the_runtime_secret_owned_by_the_container_uid
     run_test "test_fail2ban_package_is_verified_before_install" test_fail2ban_package_is_verified_before_install
     run_test "test_install_schedules_the_reboot_instead_of_rebooting_now" test_install_schedules_the_reboot_instead_of_rebooting_now
     run_test "test_no_reboot_skips_the_reboot" test_no_reboot_skips_the_reboot

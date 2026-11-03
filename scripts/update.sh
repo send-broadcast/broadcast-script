@@ -28,6 +28,17 @@ function update() {
 
   git pull
 
+  # broadcast.sh loaded this function before the pull. Run the steps after the pull with the
+  # scripts just pulled, so a fix in them takes effect tonight, not one night later.
+  # BROADCAST_UPDATE_REEXEC stops a second start: _update_continue never starts broadcast.sh again.
+  if [ -z "${BROADCAST_UPDATE_REEXEC:-}" ] && [ -x /opt/broadcast/broadcast.sh ]; then
+    BROADCAST_UPDATE_REEXEC=1 exec /opt/broadcast/broadcast.sh _update_continue
+  fi
+  _update_continue
+}
+
+# The steps after `git pull`. broadcast.sh runs them with the pulled scripts (see update).
+function _update_continue() {
   # Plugins: the new docker-compose.yml may add the plugins and egress services, which wait for
   # this secret (Broadcast itself starts without it)
   if [ -f /opt/broadcast/scripts/plugins.sh ]; then

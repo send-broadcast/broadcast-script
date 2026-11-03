@@ -81,6 +81,12 @@ chown_container_writable_dirs() {
     fi
   done
 
+  # The runtime secret is read, not written, by the containers, but a broad chown takes it from
+  # them in the same way (see repair_plugin_runtime_secret)
+  if declare -F repair_plugin_runtime_secret >/dev/null && ! repair_plugin_runtime_secret; then
+    failed="$failed secrets/plugin_runtime_secret"
+  fi
+
   if [ -n "$failed" ]; then
     echo -e "\e[31mWarning: could not give the app container (uid ${BROADCAST_CONTAINER_UID}) ownership of:${failed}.\e[0m" >&2
     echo -e "\e[31mUntil this is fixed the app cannot write uploads, upgrade triggers or TLS certificates. Is the filesystem read-only or immutable? Check: stat -c %u /opt/broadcast/app/triggers\e[0m" >&2

@@ -9,6 +9,7 @@
 # ensure_plugin_runtime_secret creates the secret that Rails, the plugin runtime and the egress
 # proxy share (uid 1000, mode 0400, bind-mounted read-only at /run/secrets). install, upgrade and
 # update call it. Until it exists, plugins and egress wait; Broadcast itself starts either way.
+# It also repairs the owner and mode of an existing secret (repair_plugin_runtime_secret).
 
 PLUGINS_ENV_FILE="/opt/broadcast/.env"
 PLUGIN_SECRET_FILE="/opt/broadcast/secrets/plugin_runtime_secret"
@@ -51,12 +52,16 @@ plugins_safe_mode_status() {
 }
 
 plugins_set_safe_mode() {
-  # Keep every other setting in .env (registry login); replace only this key
+  # Keep every other setting in .env (registry login); replace only this key. .env holds the
+  # registry password: it is rewritten in place, so its owner and mode do not change.
+  local tmp
+  tmp=$(umask 077 && mktemp)
   if [ -f "$PLUGINS_ENV_FILE" ]; then
-    grep -v '^BROADCAST_PLUGINS_SAFE_MODE=' "$PLUGINS_ENV_FILE" > "$PLUGINS_ENV_FILE.tmp" || true
-    mv "$PLUGINS_ENV_FILE.tmp" "$PLUGINS_ENV_FILE"
+    grep -v '^BROADCAST_PLUGINS_SAFE_MODE=' "$PLUGINS_ENV_FILE" > "$tmp" || true
   fi
-  echo "BROADCAST_PLUGINS_SAFE_MODE=$1" >> "$PLUGINS_ENV_FILE"
+  echo "BROADCAST_PLUGINS_SAFE_MODE=$1" >> "$tmp"
+  cat "$tmp" > "$PLUGINS_ENV_FILE"
+  rm -f "$tmp"
   (
     cd /opt/broadcast || exit 1
     if [ -f .image ]; then
@@ -77,12 +82,22 @@ plugins_set_safe_mode() {
 }
 
 ensure_plugin_runtime_secret() {
-  [ -s "$PLUGIN_SECRET_FILE" ] && return 0
+  if [ ! -s "$PLUGIN_SECRET_FILE" ]; then
+    mkdir -p "$(dirname "$PLUGIN_SECRET_FILE")"
+    (umask 077 && openssl rand -hex 32 > "$PLUGIN_SECRET_FILE")
+  fi
+  repair_plugin_runtime_secret
+}
 
-  mkdir -p "$(dirname "$PLUGIN_SECRET_FILE")"
-  (umask 077 && openssl rand -hex 32 > "$PLUGIN_SECRET_FILE")
-  chown 1000:1000 "$PLUGIN_SECRET_FILE" 2>/dev/null || sudo chown 1000:1000 "$PLUGIN_SECRET_FILE" 2>/dev/null || true
-  chmod 0400 "$PLUGIN_SECRET_FILE"
+# The containers read the secret as uid 1000. A broad `chown -R broadcast:broadcast /opt/broadcast`
+# gives it to the broadcast user, whose uid is often not 1000 (cloud images give uid 1000 to a
+# default user such as ubuntu): the containers then get "permission denied". chown_container_writable_dirs
+# (common.sh) calls this after every broad chown; upgrade and update call it through
+# ensure_plugin_runtime_secret. Returns 1 when the owner or mode could not be set.
+repair_plugin_runtime_secret() {
+  [ -f "$PLUGIN_SECRET_FILE" ] || return 0
+  chown 1000:1000 "$PLUGIN_SECRET_FILE" 2>/dev/null || sudo chown 1000:1000 "$PLUGIN_SECRET_FILE" 2>/dev/null || return 1
+  chmod 0400 "$PLUGIN_SECRET_FILE" || return 1
 }
 
 # The optional runtime service and its proxy (egress) are in the Compose profile `runtime`, off by default:
