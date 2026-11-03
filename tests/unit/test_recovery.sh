@@ -106,6 +106,23 @@ test_third_consecutive_failure_restarts_the_service() {
         "three consecutive failed Puma probes is the 2026-08-15 signature and must trigger recovery"
 }
 
+# The stack may be down because the broadcast user cannot read an env file (an admin changed its
+# owner). Recovery's restart must bring it back, so it puts the env files right first.
+test_the_recovery_restart_works_when_an_env_file_had_the_wrong_owner() {
+    harness_fake_ownership root:root
+    harness_service_reads_env_files
+    harness_mock id 'exit 0'
+    printf 'DATABASE_PASSWORD=x\n' > "$SANDBOX_ROOT/app/.env"
+    printf -- "-\tubuntu:ubuntu\t%s\t%s\n" "$SANDBOX_ROOT/app/.env" "$(ls -id "$SANDBOX_ROOT/app/.env" | awk '{ print $1 }')" >> "$SANDBOX_ROOT/.fake_owners"
+    chmod 600 "$SANDBOX_ROOT/app/.env"
+    settle_container
+    run_probes 000 3
+
+    assert_equals "1" "$(restarts_logged)" "the third failed probe must restart the stack"
+    assert_file_not_exists "$SANDBOX_ROOT/.service_failed" "the restart must bring the service up"
+    assert_equals "broadcast:broadcast 600" "$(harness_owner_and_mode "$SANDBOX_ROOT/app/.env")" "app/.env must belong to the broadcast user"
+}
+
 test_a_success_resets_the_failure_count() {
     settle_container
     run_probes 000 2
@@ -338,6 +355,7 @@ run_recovery_tests() {
     run_test "test_healthy_puma_never_restarts" test_healthy_puma_never_restarts
     run_test "test_two_consecutive_failures_do_not_restart" test_two_consecutive_failures_do_not_restart
     run_test "test_third_consecutive_failure_restarts_the_service" test_third_consecutive_failure_restarts_the_service
+    run_test "test_the_recovery_restart_works_when_an_env_file_had_the_wrong_owner" test_the_recovery_restart_works_when_an_env_file_had_the_wrong_owner
     run_test "test_a_success_resets_the_failure_count" test_a_success_resets_the_failure_count
     run_test "test_no_second_restart_within_the_cooldown" test_no_second_restart_within_the_cooldown
     run_test "test_restarts_again_after_the_cooldown_expires" test_restarts_again_after_the_cooldown_expires

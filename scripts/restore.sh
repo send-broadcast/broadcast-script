@@ -197,6 +197,10 @@ function restore_apply() {
   echo -e "\e[34mStopping Broadcast services...\e[0m"
   systemctl stop broadcast || true
 
+  # The service reads the env files as the broadcast user. If they came back from an archive as
+  # root (tar keeps the archived owner and mode), the start below would fail (see common.sh).
+  secure_env_files
+
   # Wait for connections to close
   sleep 3
 

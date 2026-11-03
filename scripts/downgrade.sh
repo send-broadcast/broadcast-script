@@ -52,6 +52,10 @@ function _downgrade_continue() {
   echo -e "\e[33mCleaning up unused Docker images...\e[0m"
   docker image prune -f
 
+  # The env files: broadcast:broadcast, mode 600 (see common.sh). The pull and the start run
+  # Compose as the broadcast user, which reads them.
+  secure_env_files
+
   # Pull target version containers
   echo -e "\e[33mPulling Broadcast containers for version $target_version...\e[0m"
   su - broadcast -c 'cd /opt/broadcast && set -a && source .image && set +a && docker compose pull'

@@ -46,19 +46,21 @@ function includeDependencies() {
 #   * BROADCAST_EDGE_ENABLED=1 in app/.env   — app shows the developer-builds card
 # The app only reads its env at boot, so both commands restart it by default;
 # --no-restart defers that (the env half stays pending until the next restart).
-# Strip any BROADCAST_EDGE_ENABLED line from an env file, in pure bash —
-# no grep/sed, so it behaves identically on GNU systems and dev machines
-# with shimmed tools.
-function _remove_edge_env_flag() {
-  local env_file="$1" tmp="${1}.tmp" line
-  : > "$tmp"
+# app/.env without any BROADCAST_EDGE_ENABLED line, plus BROADCAST_EDGE_ENABLED=1 when $1 is 1
+# (stdin: the current app/.env). Pure bash, no grep/sed, so it behaves identically on GNU systems
+# and dev machines with shimmed tools. env_file_rewrite (common.sh) replaces the file in one step.
+function _edge_env_lines() {
+  local line
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
       BROADCAST_EDGE_ENABLED=*) ;;
-      *) printf '%s\n' "$line" >> "$tmp" ;;
+      *) printf '%s\n' "$line" || return 1 ;;
     esac
-  done < "$env_file"
-  mv "$tmp" "$env_file"
+  done
+  if [ "${1:-}" = "1" ]; then
+    printf 'BROADCAST_EDGE_ENABLED=1\n' || return 1
+  fi
+  return 0
 }
 
 function edge_enable() {
@@ -68,9 +70,7 @@ function edge_enable() {
   touch /opt/broadcast/.edge_enabled
 
   local env_file="/opt/broadcast/app/.env"
-  touch "$env_file"
-  _remove_edge_env_flag "$env_file"
-  echo "BROADCAST_EDGE_ENABLED=1" >> "$env_file"
+  env_file_rewrite "$env_file" _edge_env_lines 1
 
   echo "Edge channel enabled: this host accepts dashboard-triggered upgrades to the unreleased 'edge' build,"
   echo "and the Broadcast UI will show the developer-builds card."
@@ -90,7 +90,9 @@ function edge_disable() {
   rm -f /opt/broadcast/.edge_enabled
 
   local env_file="/opt/broadcast/app/.env"
-  [ -f "$env_file" ] && _remove_edge_env_flag "$env_file"
+  if [ -f "$env_file" ]; then
+    env_file_rewrite "$env_file" _edge_env_lines
+  fi
 
   echo "Edge channel disabled: automated upgrades to 'edge' will be refused again and the UI card is hidden."
 

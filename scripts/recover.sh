@@ -211,6 +211,12 @@ function recover() {
   local reason="Puma unreachable on :3000 for $consecutive_failures consecutive probes (last code: $puma); restarting the stack"
   echo "[$(date)] recovery: $reason"
 
+  # The stack may be down because the broadcast user cannot read an env file; the restart reads
+  # them as that user (see common.sh). Never stops the restart.
+  if declare -F secure_env_files >/dev/null; then
+    secure_env_files || true
+  fi
+
   # Overridable so integration tests can drive a container instead of systemd.
   ${RECOVERY_COMMAND:-$RECOVERY_DEFAULT_COMMAND} || \
     echo "[$(date)] recovery: restart command failed"

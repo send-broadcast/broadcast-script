@@ -96,19 +96,128 @@ chown_container_writable_dirs() {
 }
 
 # The env files hold secrets: .env the registry login, app/.env the database password and the
-# Rails keys, db/.env the database password. Only their owner may read them. The broadcast user
-# owns them (install), and broadcast.service runs `docker compose` as that user, which reads all
-# three. install, upgrade and the nightly update call this. The owner stays, except a file that
-# root replaced (an older validate_license did): the broadcast user could not read it at mode 600.
-secure_env_files() {
-  local f
-  for f in /opt/broadcast/.env /opt/broadcast/app/.env /opt/broadcast/db/.env; do
-    [ -f "$f" ] || continue
-    if [ "$(stat -c %U "$f" 2>/dev/null)" = "root" ] && id broadcast >/dev/null 2>&1; then
-      chown broadcast:broadcast "$f" || true
+# Rails keys, db/.env the database password. broadcast.service runs `docker compose` as the
+# broadcast user (every version of the unit has User=broadcast), and Compose reads all three. So
+# their one correct state is broadcast:broadcast, mode 600: the broadcast user reads them, other
+# users do not. Other env files an admin adds (for example one named in
+# docker-compose.override.yml) are not in this list and are never changed.
+BROADCAST_ENV_FILES="/opt/broadcast/.env /opt/broadcast/app/.env /opt/broadcast/db/.env"
+
+# 0 when the broadcast user can read the file. Asked as that user, so the directories above the
+# file and any ACL count too. runuser is in /usr/sbin, which root's cron PATH does not include.
+broadcast_user_can_read() {
+  local runuser_bin="" candidate
+  for candidate in "$(command -v runuser 2>/dev/null || true)" /usr/sbin/runuser /sbin/runuser; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      runuser_bin="$candidate"
+      break
     fi
-    chmod 600 "$f" || true
   done
+  if [ -n "$runuser_bin" ]; then
+    "$runuser_bin" -u broadcast -- test -r "$1" 2>/dev/null
+  else
+    su -s /bin/sh -c "test -r '$1'" broadcast 2>/dev/null
+  fi
+}
+
+# Gives one env file the state above. The service must keep running whatever state the server is
+# in, so this fails safe: when the owner cannot be changed, the file stays as it is; when the
+# broadcast user cannot read the file afterwards, its previous owner and mode come back. Each
+# case prints a warning. A file that is already right is not touched. Never fails; returns 2 for
+# a symlink, which it does not follow (secure_env_files names those).
+secure_env_file() {
+  local f="$1" state owner mode names
+  [ -L "$f" ] && return 2
+  [ -f "$f" ] || return 0
+  state=$(stat -c '%u:%g %a %U:%G' "$f" 2>/dev/null) || return 0
+  read -r owner mode names <<< "$state"
+  [ "$names" = "broadcast:broadcast" ] && [ "$mode" = "600" ] && return 0
+
+  if [ "$names" != "broadcast:broadcast" ] && ! chown broadcast:broadcast "$f" 2>/dev/null; then
+    echo -e "\e[33mWarning: could not give $f to the broadcast user; it stays as it was.\e[0m"
+    return 0
+  fi
+  [ "$mode" = "600" ] || chmod 600 "$f" 2>/dev/null || true
+
+  if ! broadcast_user_can_read "$f"; then
+    chown "$owner" "$f" 2>/dev/null || true
+    chmod "$mode" "$f" 2>/dev/null || true
+    echo -e "\e[33mWarning: the broadcast user could not read $f at mode 600, so its previous owner and mode ($owner, $mode) are back.\e[0m"
+  fi
+  return 0
+}
+
+# install, upgrade, the nightly update, restore, fix, start, restart and recovery call this. A
+# server without a broadcast user is left as it is.
+secure_env_files() {
+  id broadcast >/dev/null 2>&1 || return 0
+  local f links=""
+  for f in $BROADCAST_ENV_FILES; do
+    secure_env_file "$f" || links="$links $f"
+  done
+  if [ -n "$links" ]; then
+    echo -e "\e[33mNote: these env files are symlinks, so their owner and mode were left as they are:$links\e[0m"
+  fi
+  return 0
+}
+
+# Rewriting an env file in place (`cat new > file`) empties it first: a full disk or a crash in
+# the middle leaves it empty or cut short, and with it the registry login or the database
+# password. env_file_rewrite writes the new content to a temp file in the same directory, gives it
+# the owner and mode above, and moves it over the old file in one step.
+#   env_file_rewrite FILE COMMAND [ARG...]
+# COMMAND reads the current content on stdin (nothing when FILE does not exist) and prints the new
+# content. When it fails, or a write fails, FILE stays as it was and this returns 1.
+env_file_rewrite() {
+  local target="$1" tmp
+  shift
+  tmp=$(umask 077 && mktemp "$(dirname "$target")/.env.tmp.XXXXXX") || return 1
+  if [ -f "$target" ]; then
+    "$@" < "$target" > "$tmp"
+  else
+    "$@" < /dev/null > "$tmp"
+  fi || { rm -f "$tmp"; return 1; }
+  # Nothing to change (the nightly runs write the same content): leave the file as it is
+  if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
+    rm -f "$tmp"
+    return 0
+  fi
+  env_file_commit "$tmp" "$target"
+}
+
+# Moves a complete temp file (same directory) over an env file; see env_file_rewrite.
+env_file_commit() {
+  local tmp="$1" target="$2" state
+  # A symlink stays a symlink: the content goes through it, the owner and mode stay as they are
+  if [ -L "$target" ]; then
+    if cat "$tmp" > "$target"; then
+      rm -f "$tmp"
+      return 0
+    fi
+    rm -f "$tmp"
+    return 1
+  fi
+
+  if id broadcast >/dev/null 2>&1 && chown broadcast:broadcast "$tmp" 2>/dev/null; then
+    chmod 600 "$tmp"
+  elif [ -f "$target" ] && state=$(stat -c '%u:%g %a' "$target" 2>/dev/null); then
+    # The broadcast user cannot have it: keep the owner and mode the file has now
+    chown "${state% *}" "$tmp" 2>/dev/null || true
+    chmod "${state#* }" "$tmp" 2>/dev/null || true
+  else
+    chmod 644 "$tmp"
+  fi
+  # Fail safe: the service reads this file as the broadcast user
+  if id broadcast >/dev/null 2>&1 && ! broadcast_user_can_read "$tmp"; then
+    chmod 644 "$tmp" 2>/dev/null || true
+    echo -e "\e[33mWarning: $target is now readable by every user, because the broadcast user could not read it otherwise.\e[0m"
+  fi
+
+  sync "$tmp" 2>/dev/null || true
+  if ! mv -f "$tmp" "$target"; then
+    rm -f "$tmp"
+    return 1
+  fi
   return 0
 }
 
@@ -283,23 +392,24 @@ validate_license() {
   echo -e "\e[32mLicense key valid!\e[0m"
 
   # Replace, never append: validate_license is run casually for its
-  # summary, and blind appends would grow .env with duplicate credentials
-  # .env is rewritten in place, so its owner stays, and only its owner can read it
-  local env_tmp
-  env_tmp=$(umask 077 && mktemp)
-  if [ -f /opt/broadcast/.env ]; then
-    grep -v "^BROADCAST_REGISTRY_" /opt/broadcast/.env > "$env_tmp" || true
+  # summary, and blind appends would grow .env with duplicate credentials.
+  # The new .env replaces the old one in one step (env_file_rewrite).
+  if ! env_file_rewrite /opt/broadcast/.env _registry_env_lines; then
+    echo -e "\e[31mError: could not write /opt/broadcast/.env (is the disk full?). It is unchanged.\e[0m"
+    return 1
   fi
-  echo "BROADCAST_REGISTRY_URL=$registry_url" >> "$env_tmp"
-  echo "BROADCAST_REGISTRY_LOGIN=$registry_login" >> "$env_tmp"
-  echo "BROADCAST_REGISTRY_PASSWORD=$registry_password" >> "$env_tmp"
-  (umask 077 && cat "$env_tmp" > /opt/broadcast/.env)
-  rm -f "$env_tmp"
-  chmod 600 /opt/broadcast/.env
 
   print_license_summary "$response" "$domain"
 
   return 0
+}
+
+# .env with the registry login replaced (stdin: the current .env). Reads the registry_* locals of
+# validate_license.
+_registry_env_lines() {
+  grep -v "^BROADCAST_REGISTRY_" || [ $? -eq 1 ] || return 1
+  printf 'BROADCAST_REGISTRY_URL=%s\nBROADCAST_REGISTRY_LOGIN=%s\nBROADCAST_REGISTRY_PASSWORD=%s\n' \
+    "$registry_url" "$registry_login" "$registry_password"
 }
 
 # Operator summary from the enriched /license/check response. Every field
@@ -499,20 +609,26 @@ generate_encryption_keys() {
   fi
 
   echo -e "\e[33mGenerating Active Record encryption keys...\e[0m"
-  local name
-  for name in $missing; do
-    # Drop an empty "NAME=" line so the new value is the only one. cat > keeps
-    # the file's owner and mode.
-    awk -v empty="${name}=" '$0 != empty' "$app_env_file" > "$app_env_file.tmp"
-    cat "$app_env_file.tmp" > "$app_env_file"
-    rm -f "$app_env_file.tmp"
-    echo "${name}=$(openssl rand -hex 16)" >> "$app_env_file"
-  done
-
-  chown broadcast:broadcast "$app_env_file"
+  if ! env_file_rewrite "$app_env_file" _fill_encryption_keys "$missing"; then
+    echo -e "\e[31mError: could not write app/.env (is the disk full?). It is unchanged.\e[0m"
+    return 1
+  fi
 
   echo -e "\e[32mEncryption keys generated and added to app/.env.\e[0m"
   echo -e "\e[33mRestart Broadcast for changes to take effect: ./broadcast.sh restart\e[0m"
+}
+
+# app/.env with a value for each name in $1 (stdin: the current app/.env). An empty "NAME=" line
+# is dropped so the new value is the only one; every other line stays.
+_fill_encryption_keys() {
+  local names name value
+  # One line for awk -v, which does not take a newline in a value
+  names=$(echo $1)
+  awk -v names="$names" 'BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) empty[a[i] "="] = 1 } !($0 in empty)' || return 1
+  for name in $names; do
+    value=$(openssl rand -hex 16) && [ -n "$value" ] || return 1
+    echo "${name}=${value}" || return 1
+  done
 }
 
 change_installation_domain() {
@@ -599,6 +715,8 @@ change_installation_domain() {
   # Re-assert container-writable dirs after the broad chown (see above);
   # a failure is already printed, and the domain change should still finish
   chown_container_writable_dirs || true
+  # The env files: broadcast:broadcast, mode 600 (see secure_env_files)
+  secure_env_files
   
   # Restart services to pick up new SSL certificates and configuration
   echo -e "\e[33mRestarting Broadcast services to apply changes...\e[0m"

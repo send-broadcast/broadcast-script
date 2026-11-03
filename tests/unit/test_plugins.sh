@@ -81,21 +81,19 @@ test_ensure_secret_creates_64_hex_characters_once() {
     assert_equals "$secret" "$(cat "$SANDBOX_ROOT/secrets/plugin_runtime_secret")" "an existing secret must be kept"
 }
 
-# .env holds the registry password. safe-mode must change one line and keep the file itself: a
-# replaced file belongs to root (the scripts run as root) and gets the default mode. The same inode
-# shows the file was rewritten in place, so its owner did not change.
+# .env holds the registry password. safe-mode changes one line; every other line stays. The file's
+# owner and mode, and a failed write, are in tests/unit/test_env_file_modes.sh.
 assert_safe_mode_keeps_the_env_file() {
-    local value="$1" before after
+    local value="$1"
     harness_fake_ownership
+    harness_mock id 'exit 0'
     printf 'BROADCAST_REGISTRY_URL=r.example\nBROADCAST_REGISTRY_PASSWORD=pw\n' > "$SANDBOX_ROOT/.env"
-    /bin/chmod 640 "$SANDBOX_ROOT/.env"
-    before=$("$SANDBOX_ROOT/mocks/stat" -c "%i %a" "$SANDBOX_ROOT/.env")
 
     sandbox_run "plugins safe-mode $value" >/dev/null
 
-    after=$("$SANDBOX_ROOT/mocks/stat" -c "%i %a" "$SANDBOX_ROOT/.env")
-    assert_equals "$before" "$after" "safe-mode $value must keep the inode (owner) and the mode of .env"
+    assert_contains "$(cat "$SANDBOX_ROOT/.env")" "BROADCAST_REGISTRY_URL=r.example" "the registry URL must stay"
     assert_contains "$(cat "$SANDBOX_ROOT/.env")" "BROADCAST_REGISTRY_PASSWORD=pw" "the registry login must stay"
+    assert_equals "broadcast:broadcast 600" "$(harness_owner_and_mode "$SANDBOX_ROOT/.env")" "safe-mode $value must leave .env private"
 }
 
 test_safe_mode_on_keeps_the_owner_and_mode_of_env() {

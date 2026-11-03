@@ -136,6 +136,8 @@ test_set_docker_image_defaults_to_latest() {
 
 test_generate_encryption_keys_adds_all_three_keys() {
     touch "$SANDBOX_ROOT/app/.env"
+    # As on a server: the broadcast user exists (env files go to it, see common.sh)
+    harness_mock id 'exit 0'
     local rc=0
     sandbox_run "generate_encryption_keys" >/dev/null || rc=$?
     assert_equals "0" "$rc" "generate_encryption_keys should succeed"

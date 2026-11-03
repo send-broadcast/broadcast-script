@@ -51,17 +51,20 @@ plugins_safe_mode_status() {
   fi
 }
 
+# .env with the safe-mode flag set to $1 (stdin: the current .env); every other line stays
+_safe_mode_env_lines() {
+  grep -v '^BROADCAST_PLUGINS_SAFE_MODE=' || [ $? -eq 1 ] || return 1
+  echo "BROADCAST_PLUGINS_SAFE_MODE=$1"
+}
+
 plugins_set_safe_mode() {
   # Keep every other setting in .env (registry login); replace only this key. .env holds the
-  # registry password: it is rewritten in place, so its owner and mode do not change.
-  local tmp
-  tmp=$(umask 077 && mktemp)
-  if [ -f "$PLUGINS_ENV_FILE" ]; then
-    grep -v '^BROADCAST_PLUGINS_SAFE_MODE=' "$PLUGINS_ENV_FILE" > "$tmp" || true
+  # registry password: env_file_rewrite (common.sh) replaces it in one step, as broadcast:broadcast
+  # with mode 600, so it is never empty or cut short.
+  if ! env_file_rewrite "$PLUGINS_ENV_FILE" _safe_mode_env_lines "$1"; then
+    echo -e "\e[31mError: could not write $PLUGINS_ENV_FILE (is the disk full?). It is unchanged.\e[0m"
+    return 1
   fi
-  echo "BROADCAST_PLUGINS_SAFE_MODE=$1" >> "$tmp"
-  cat "$tmp" > "$PLUGINS_ENV_FILE"
-  rm -f "$tmp"
   (
     cd /opt/broadcast || exit 1
     if [ -f .image ]; then
@@ -115,24 +118,29 @@ plugin_runtime_profile_enabled() {
 }
 
 # Rewrite COMPOSE_PROFILES with the runtime profile added (on) or removed (off). Other profiles
-# and every other line of .env stay. .env holds the registry password: it is rewritten in place,
-# so its owner and mode do not change.
+# and every other line of .env stay. .env holds the registry password: env_file_rewrite
+# (common.sh) replaces it in one step, as broadcast:broadcast with mode 600, so it is never empty
+# or cut short. Returns 1 (and .env stays as it was) when it cannot be written.
 set_plugin_runtime_profile() {
-  local state="$1" profiles="" kept="" p tmp
-  tmp=$(umask 077 && mktemp)
+  local state="$1" profiles="" kept="" p
   if [ -f "$PLUGINS_ENV_FILE" ]; then
     profiles=$(grep '^COMPOSE_PROFILES=' "$PLUGINS_ENV_FILE" | tail -1 | cut -d= -f2- | tr -d "\"' ")
-    grep -v '^COMPOSE_PROFILES=' "$PLUGINS_ENV_FILE" > "$tmp" || true
   fi
   local IFS=','
   for p in $profiles; do
     [ -n "$p" ] && [ "$p" != "$PLUGIN_RUNTIME_PROFILE" ] && kept="${kept:+$kept,}$p"
   done
   [ "$state" = "on" ] && kept="${kept:+$kept,}$PLUGIN_RUNTIME_PROFILE"
-  [ -n "$kept" ] && echo "COMPOSE_PROFILES=$kept" >> "$tmp"
-  cat "$tmp" > "$PLUGINS_ENV_FILE"
-  rm -f "$tmp"
-  return 0
+  IFS=$' \t\n'
+  env_file_rewrite "$PLUGINS_ENV_FILE" _runtime_profile_env_lines "$kept"
+}
+
+# .env with COMPOSE_PROFILES=$1, or without the line when $1 is empty (stdin: the current .env)
+_runtime_profile_env_lines() {
+  grep -v '^COMPOSE_PROFILES=' || [ $? -eq 1 ] || return 1
+  if [ -n "$1" ]; then
+    echo "COMPOSE_PROFILES=$1"
+  fi
 }
 
 # 0 = the image contains the binary, 1 = it does not, 2 = docker could not answer
@@ -154,11 +162,17 @@ sync_plugin_runtime_profile() {
 
   case "$rc" in
     0)
-      set_plugin_runtime_profile on
+      if ! set_plugin_runtime_profile on; then
+        echo -e "\e[33mWarning: could not write /opt/broadcast/.env; the optional runtime setting is unchanged.\e[0m"
+        return 0
+      fi
       echo -e "\e[32mThe optional runtime service is on (the image contains it).\e[0m"
       ;;
     1)
-      set_plugin_runtime_profile off
+      if ! set_plugin_runtime_profile off; then
+        echo -e "\e[33mWarning: could not write /opt/broadcast/.env; the optional runtime setting is unchanged.\e[0m"
+        return 0
+      fi
       # A container from an earlier start would keep restarting; Compose no longer manages it
       docker rm -f plugins egress >/dev/null 2>&1 || true
       echo "The optional runtime service stays off (this image does not contain it)."
