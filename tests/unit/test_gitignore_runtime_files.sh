@@ -22,6 +22,10 @@ script_root_dotfiles() {
 # Files that scripts derive from another path, so the search above misses them
 DERIVED_FILES=".recovery_state.lock"
 
+# Temp files of an env file rewrite (env_file_rewrite in common.sh: mktemp next to the file). An
+# interrupted run can leave one behind.
+ENV_TEMP_SAMPLES=".env.tmp.AbC123 app/.env.tmp.AbC123 db/.env.tmp.AbC123"
+
 # Directories that hold customer data at runtime (bind-mounted into containers)
 DATA_DIR_SAMPLES="app/storage/broadcast-backup-20260101.tar.gz app/storage/ab/cd/blob db/backups/broadcast-backup-20260101.tar.gz db/backups/VERSION"
 
@@ -43,6 +47,14 @@ test_runtime_dotfiles_are_ignored() {
         is_ignored "$f" || missing="$missing $f"
     done
     assert_equals "" "$missing" "runtime files missing from .gitignore"
+}
+
+test_env_rewrite_temp_files_are_ignored() {
+    local f missing=""
+    for f in $ENV_TEMP_SAMPLES; do
+        is_ignored "$f" || missing="$missing $f"
+    done
+    assert_equals "" "$missing" "env rewrite temp files missing from .gitignore"
 }
 
 test_data_dirs_are_ignored() {
@@ -67,6 +79,7 @@ run_gitignore_runtime_tests() {
 
     run_test "test_search_finds_runtime_dotfiles" test_search_finds_runtime_dotfiles
     run_test "test_runtime_dotfiles_are_ignored" test_runtime_dotfiles_are_ignored
+    run_test "test_env_rewrite_temp_files_are_ignored" test_env_rewrite_temp_files_are_ignored
     run_test "test_data_dirs_are_ignored" test_data_dirs_are_ignored
     run_test "test_ignored_data_dirs_track_only_gitkeep" test_ignored_data_dirs_track_only_gitkeep
 

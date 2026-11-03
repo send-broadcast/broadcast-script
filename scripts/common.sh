@@ -136,7 +136,7 @@ secure_env_file() {
   if ! broadcast_user_can_read "$f"; then
     chown "$owner" "$f" 2>/dev/null || true
     chmod "$mode" "$f" 2>/dev/null || true
-    echo -e "\e[33mWarning: the broadcast user could not read $f at mode 600, so its previous owner and mode ($owner, $mode) are back.\e[0m"
+    echo -e "\e[33mWarning: the broadcast user cannot read $f after the change (check the file and its directories), so its previous owner and mode ($owner, $mode) are back.\e[0m"
   fi
   return 0
 }
@@ -171,9 +171,13 @@ env_file_rewrite() {
   else
     "$@" < /dev/null > "$tmp"
   fi || { rm -f "$tmp"; return 1; }
-  # Nothing to change (the nightly runs write the same content): leave the file as it is
+  # Nothing to change (the nightly runs write the same content): leave the content as it is, but
+  # still put the owner and mode right (an older validate_license left .env root:root 644)
   if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
     rm -f "$tmp"
+    if id broadcast >/dev/null 2>&1; then
+      secure_env_file "$target" || true
+    fi
     return 0
   fi
   env_file_commit "$tmp" "$target"

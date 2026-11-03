@@ -123,6 +123,145 @@ test_the_recovery_restart_works_when_an_env_file_had_the_wrong_owner() {
     assert_equals "broadcast:broadcast 600" "$(harness_owner_and_mode "$SANDBOX_ROOT/app/.env")" "app/.env must belong to the broadcast user"
 }
 
+# --- env files the broadcast user cannot read ------------------------------
+#
+# broadcast.service runs Docker Compose as the broadcast user. When that user cannot read an env
+# file, the service never gets a container: it stays in its restart loop (activating), or, with an
+# older unit that has a start limit, it ends failed. The container guards below return early in
+# both cases, so recovery puts the env files right on every tick, before them. When the files are
+# right, a tick changes nothing and runs no runuser (no auth.log session every minute).
+
+# env_file_owned_by OWNER MODE: app/.env with this owner and mode, the other two files right
+env_file_owned_by() {
+    harness_fake_ownership root:root
+    harness_service_reads_env_files
+    harness_mock id 'exit 0'
+    local f
+    printf 'REGISTRY=x\n' > "$SANDBOX_ROOT/.env"
+    printf 'DATABASE_PASSWORD=x\n' > "$SANDBOX_ROOT/app/.env"
+    printf 'POSTGRES_PASSWORD=x\n' > "$SANDBOX_ROOT/db/.env"
+    for f in "$SANDBOX_ROOT" "$SANDBOX_ROOT/app" "$SANDBOX_ROOT/db" "$SANDBOX_ROOT/.env" "$SANDBOX_ROOT/db/.env"; do
+        fake_owner broadcast:broadcast "$f"
+    done
+    /bin/chmod 600 "$SANDBOX_ROOT/.env" "$SANDBOX_ROOT/db/.env"
+    fake_owner "$1" "$SANDBOX_ROOT/app/.env"
+    /bin/chmod "$2" "$SANDBOX_ROOT/app/.env"
+}
+
+fake_owner() {
+    printf -- "-\t%s\t%s\t%s\n" "$1" "$2" "$(ls -id "$2" | awk '{ print $1 }')" >> "$SANDBOX_ROOT/.fake_owners"
+}
+
+service_state() {
+    echo "$1" > "$SANDBOX_ROOT/.service_state"
+}
+
+# One cron tick while the service has no container (it cannot start)
+tick_without_container() {
+    CONTAINER_RUNNING=absent run_probes 000 1
+}
+
+assert_app_env_repaired() {
+    assert_equals "broadcast:broadcast 600" "$(harness_owner_and_mode "$SANDBOX_ROOT/app/.env")" "$1"
+}
+
+# What systemd's next restart (5 s later) does: it must work now
+assert_the_next_start_works() {
+    local rc=0 output
+    output=$(sandbox_run "systemctl restart broadcast") || rc=$?
+    assert_equals "0" "$rc" "$1 ($output)"
+}
+
+test_a_service_in_its_restart_loop_on_a_file_of_another_user_comes_back() {
+    env_file_owned_by ubuntu:ubuntu 600
+    service_state activating
+    tick_without_container
+
+    assert_app_env_repaired "the first tick must give app/.env back to the broadcast user"
+    harness_assert_not_called "systemctl restart broadcast" "systemd's own restart loop brings it up; recovery must not restart it"
+    harness_assert_not_called "systemctl start broadcast" "systemd's own restart loop brings it up; recovery must not start it"
+    assert_the_next_start_works "the service's next restart must find a readable app/.env"
+}
+
+test_a_failed_service_on_a_file_of_a_uid_with_no_name_is_started() {
+    env_file_owned_by 4242:4242 600
+    service_state failed
+    tick_without_container
+
+    assert_app_env_repaired "a uid with no name is not the broadcast user"
+    harness_assert_call_order "systemctl reset-failed broadcast" "systemctl start broadcast"
+    assert_equals "active" "$(cat "$SANDBOX_ROOT/.service_state")" "an older unit stops retrying (failed); recovery must start it once the files are right"
+    assert_file_not_exists "$SANDBOX_ROOT/.service_failed" "the start must work"
+}
+
+test_a_root_owned_file_at_mode_600_is_repaired_while_the_service_is_down() {
+    env_file_owned_by root:root 600
+    service_state activating
+    tick_without_container
+
+    assert_app_env_repaired "root:root 600 stops Compose as the broadcast user"
+    assert_the_next_start_works "the service's next restart must find a readable app/.env"
+}
+
+# An admin who ran `systemctl stop broadcast` wants it stopped
+test_a_service_an_admin_stopped_is_left_alone() {
+    env_file_owned_by broadcast:broadcast 600
+    service_state inactive
+    local i
+    for i in 1 2 3 4 5; do tick_without_container; done
+
+    harness_assert_not_called "systemctl start" "recovery must not start a service an admin stopped"
+    harness_assert_not_called "systemctl restart" "recovery must not restart a service an admin stopped"
+    harness_assert_not_called "chown" "the files are right"
+    harness_assert_not_called "runuser" "nothing changed, so there is nothing to check"
+    assert_equals "inactive" "$(cat "$SANDBOX_ROOT/.service_state")" "the service must stay stopped"
+}
+
+test_a_service_an_admin_stopped_stays_stopped_when_a_file_is_repaired() {
+    env_file_owned_by ubuntu:ubuntu 600
+    service_state inactive
+    tick_without_container
+
+    assert_app_env_repaired "the file is repaired, so the admin's next start works"
+    harness_assert_not_called "systemctl start" "recovery must not start a service an admin stopped"
+    harness_assert_not_called "systemctl restart" "recovery must not restart a service an admin stopped"
+    assert_equals "inactive" "$(cat "$SANDBOX_ROOT/.service_state")" "the service must stay stopped"
+}
+
+# Every minute: no chown, no chmod and no runuser session in auth.log when nothing changes
+test_ticks_with_the_env_files_right_change_and_check_nothing() {
+    env_file_owned_by broadcast:broadcast 600
+    run_probes 200 5
+
+    harness_assert_not_called "chown" "the files are right"
+    harness_assert_not_called "chmod" "the files are right"
+    harness_assert_not_called "runuser" "nothing changed, so there is nothing to check"
+}
+
+# The fail-safe put a file back (the broadcast user cannot read it there, for example a directory
+# at mode 700): the next ticks do not try the same thing again every minute
+test_a_repair_the_fail_safe_undid_is_not_tried_every_minute() {
+    env_file_owned_by root:root 644
+    local i
+    for i in 1 2 3; do
+        sandbox_run "recover" "export RECOVERY_CONTAINER_RUNNING=absent; export FAKE_RUNUSER_DENY=1" >/dev/null
+    done
+
+    assert_equals "root:root 644" "$(harness_owner_and_mode "$SANDBOX_ROOT/app/.env")" "the fail-safe keeps the previous owner and mode"
+    assert_equals "1" "$(/usr/bin/grep -c '^runuser' "$SANDBOX_CALLS")" "one check, not one every minute"
+    harness_assert_not_called "systemctl start" "nothing was repaired"
+}
+
+# ...but a change to a file or its directories is tried again
+test_a_repair_is_tried_again_when_the_files_change() {
+    env_file_owned_by root:root 644
+    sandbox_run "recover" "export RECOVERY_CONTAINER_RUNNING=absent; export FAKE_RUNUSER_DENY=1" >/dev/null
+    /bin/chmod 711 "$SANDBOX_ROOT/app"
+    tick_without_container
+
+    assert_app_env_repaired "a change in the directory above the file must lead to a new try"
+}
+
 test_a_success_resets_the_failure_count() {
     settle_container
     run_probes 000 2
@@ -356,6 +495,14 @@ run_recovery_tests() {
     run_test "test_two_consecutive_failures_do_not_restart" test_two_consecutive_failures_do_not_restart
     run_test "test_third_consecutive_failure_restarts_the_service" test_third_consecutive_failure_restarts_the_service
     run_test "test_the_recovery_restart_works_when_an_env_file_had_the_wrong_owner" test_the_recovery_restart_works_when_an_env_file_had_the_wrong_owner
+    run_test "test_a_service_in_its_restart_loop_on_a_file_of_another_user_comes_back" test_a_service_in_its_restart_loop_on_a_file_of_another_user_comes_back
+    run_test "test_a_failed_service_on_a_file_of_a_uid_with_no_name_is_started" test_a_failed_service_on_a_file_of_a_uid_with_no_name_is_started
+    run_test "test_a_root_owned_file_at_mode_600_is_repaired_while_the_service_is_down" test_a_root_owned_file_at_mode_600_is_repaired_while_the_service_is_down
+    run_test "test_a_service_an_admin_stopped_is_left_alone" test_a_service_an_admin_stopped_is_left_alone
+    run_test "test_a_service_an_admin_stopped_stays_stopped_when_a_file_is_repaired" test_a_service_an_admin_stopped_stays_stopped_when_a_file_is_repaired
+    run_test "test_ticks_with_the_env_files_right_change_and_check_nothing" test_ticks_with_the_env_files_right_change_and_check_nothing
+    run_test "test_a_repair_the_fail_safe_undid_is_not_tried_every_minute" test_a_repair_the_fail_safe_undid_is_not_tried_every_minute
+    run_test "test_a_repair_is_tried_again_when_the_files_change" test_a_repair_is_tried_again_when_the_files_change
     run_test "test_a_success_resets_the_failure_count" test_a_success_resets_the_failure_count
     run_test "test_no_second_restart_within_the_cooldown" test_no_second_restart_within_the_cooldown
     run_test "test_restarts_again_after_the_cooldown_expires" test_restarts_again_after_the_cooldown_expires

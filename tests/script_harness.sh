@@ -100,6 +100,8 @@ MOCK
 
 harness_install_default_mocks() {
     harness_mock systemctl 'if [ "${1:-}" = "is-enabled" ]; then exit "${SYSTEMCTL_IS_ENABLED_RC:-0}"; fi
+# No unit is in the failed state unless a test says so
+if [ "${1:-}" = "is-failed" ]; then exit "${SYSTEMCTL_IS_FAILED_RC:-1}"; fi
 exit 0'
     harness_mock docker 'case "$*" in
   *pg_dump*) printf "FAKE PG DUMP PAYLOAD\n" ;;
@@ -257,6 +259,10 @@ harness_owner_and_mode() {
 # and db/.env. With this, `systemctl start|restart broadcast` fails, like Compose with "permission
 # denied", when the broadcast user cannot read one of them (needs harness_fake_ownership). So does
 # `su - broadcast -c '... docker compose ...'` (the upgrade's pull); it records .compose_failed.
+# The unit's state is in .service_state (default active; a test may write activating, failed or
+# inactive): a start or restart that works makes it active, one that fails leaves it as it was,
+# stop makes it inactive, reset-failed turns failed into inactive, and is-active / is-failed
+# answer from it.
 harness_service_reads_env_files() {
     harness_mock su 'case "$*" in
   *"docker compose"*)
@@ -271,11 +277,36 @@ harness_service_reads_env_files() {
     ;;
 esac
 exit 0'
-    harness_mock systemctl 'case "${1:-}" in
+    harness_mock systemctl 'state_file="$BROADCAST_ROOT/.service_state"
+state=$(cat "$state_file" 2>/dev/null || echo active)
+unit=""
+for a in "$@"; do
+  case "$a" in
+    broadcast|broadcast.service) unit=broadcast ;;
+  esac
+done
+case "${1:-}" in
   is-enabled) exit "${SYSTEMCTL_IS_ENABLED_RC:-0}" ;;
+  is-active)
+    [ "$unit" = broadcast ] || exit 0
+    case " $* " in *" --quiet "*) ;; *) echo "$state" ;; esac
+    [ "$state" = active ]
+    exit
+    ;;
+  is-failed)
+    [ "$unit" = broadcast ] || exit 1
+    case " $* " in *" --quiet "*) ;; *) echo "$state" ;; esac
+    [ "$state" = failed ]
+    exit
+    ;;
+  reset-failed)
+    if [ "$unit" = broadcast ] && [ "$state" = failed ]; then echo inactive > "$state_file"; fi
+    ;;
+  stop)
+    [ "$unit" = broadcast ] && echo inactive > "$state_file"
+    ;;
   start|restart)
-    case "${2:-}" in
-      broadcast|broadcast.service)
+    if [ "$unit" = broadcast ]; then
         for f in "$BROADCAST_ROOT/.env" "$BROADCAST_ROOT/app/.env" "$BROADCAST_ROOT/db/.env"; do
           [ -e "$f" ] || continue
           if ! "$BROADCAST_ROOT/mocks/.fake_can_read" broadcast "$f"; then
@@ -284,8 +315,8 @@ exit 0'
             exit 1
           fi
         done
-        ;;
-    esac
+        echo active > "$state_file"
+    fi
     ;;
 esac
 exit 0'
