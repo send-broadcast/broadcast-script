@@ -199,6 +199,13 @@ $UPDATE_INLINE") || rc=$?
     assert_equals "root:root 644" "$(harness_owner_and_mode "$SANDBOX_ROOT/app/.env")" "the previous owner and mode must come back"
     assert_equals "broadcast:broadcast 644" "$(harness_owner_and_mode "$SANDBOX_ROOT/db/.env")" "db/.env must come back too"
     assert_contains "$output" "Warning" "the operator must be told"
+    # The cause can be the file or a directory above it (a directory at mode 700), not the mode 600
+    assert_contains "$output" "check the file and its directories" "the warning must point at the file and its directories"
+    if [[ "$output" == *"at mode 600"* ]]; then
+        echo "Assertion failed: the warning must not blame mode 600"
+        TEST_FAILED=true
+        return 1
+    fi
 }
 
 test_upgrade_still_starts_when_the_env_files_cannot_be_changed() {
@@ -241,6 +248,22 @@ test_a_rewrite_that_changes_nothing_leaves_env_alone() {
     assert_equals "$before" "$(ls -id "$SANDBOX_ROOT/.env" | awk '{ print $1 }')" "the same content must not be written again"
     harness_assert_not_called "chown" "nothing changed"
     assert_equals "" "$(ls -A "$SANDBOX_ROOT" | /usr/bin/grep '^\.env\.' || true)" "no temporary file may stay behind"
+}
+
+# The same license again on a server where .env is root:root 644 (an older validate_license left
+# it so): the content stays, but the owner and mode are still put right
+test_validate_license_with_the_same_content_still_makes_env_private() {
+    printf 'BROADCAST_REGISTRY_URL=r2.example\nBROADCAST_REGISTRY_LOGIN=l2\nBROADCAST_REGISTRY_PASSWORD=pw2\n' > "$SANDBOX_ROOT/.env"
+    own root:root "$SANDBOX_ROOT/.env"
+    /bin/chmod 644 "$SANDBOX_ROOT/.env"
+    local before rc=0
+    before=$(ls -id "$SANDBOX_ROOT/.env" | awk '{ print $1 }')
+    sandbox_run "validate_license" "$LICENSE_RESPONSE" >/dev/null || rc=$?
+
+    assert_equals "0" "$rc" "the license check should succeed"
+    assert_equals "$before" "$(ls -id "$SANDBOX_ROOT/.env" | awk '{ print $1 }')" "the same content must not be written again"
+    assert_equals "broadcast:broadcast 600" "$(harness_owner_and_mode "$SANDBOX_ROOT/.env")" "the registry password must be private"
+    assert_service_restarts "after validate_license"
 }
 
 test_validate_license_creates_a_new_env_at_mode_600() {

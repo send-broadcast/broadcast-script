@@ -18,6 +18,7 @@ docker-compose.override.yml
 .recovery_state
 .recovery_state.lock
 .env.tmp
+.env.tmp.*
 app/monitor/*
 app/uploads/*
 app/triggers/*

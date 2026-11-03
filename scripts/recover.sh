@@ -83,8 +83,53 @@ consecutive_failures=$consecutive_failures
 last_recovery_at=$last_recovery_at
 container_started_at=$container_started_at
 probes_since_start=$probes_since_start
+env_files_state=$env_files_state
 STATE
   mv "$state_file.tmp" "$state_file"
+}
+
+# Inode, owner, group and mode of each env file and of its directory, on one line with no spaces
+# (it goes into the state file). A file that is not there is "-".
+_recovery_env_files_state() {
+  local f out=""
+  for f in $BROADCAST_ENV_FILES; do
+    out="$out$(stat -c '%i:%u:%g:%a' "$f" 2>/dev/null || echo -)/$(stat -c '%i:%u:%g:%a' "$(dirname "$f")" 2>/dev/null || echo -),"
+  done
+  echo "$out"
+}
+
+# The env files (see secure_env_files in common.sh). broadcast.service runs Docker Compose as the
+# broadcast user: when that user cannot read an env file, the service has no container and stays
+# in its restart loop, or, with an older unit that has a start limit, ends failed. The container
+# guards in recover() return early then, so this runs on every tick before them.
+#
+#   - Files that are right: secure_env_files changes and checks nothing (no runuser session in
+#     auth.log every minute).
+#   - The state of the files after each run is kept (env_files_state). When the fail-safe had to put
+#     a file back (the broadcast user cannot read it, for example under a directory at mode 700),
+#     the next ticks do not try again until a file or a directory changes.
+#   - A repaired file is enough for the restart loop: systemd tries again within seconds. Only a
+#     unit that has stopped trying (failed) is started. A service an admin stopped (inactive) is
+#     left stopped.
+_recovery_secure_env_files() {
+  declare -F secure_env_files >/dev/null || return 0
+  id broadcast >/dev/null 2>&1 || return 0
+
+  local before after
+  before=$(_recovery_env_files_state)
+  [ "$before" = "$env_files_state" ] && return 0
+  secure_env_files || true
+  after=$(_recovery_env_files_state)
+  env_files_state="$after"
+  [ "$after" = "$before" ] && return 0
+
+  echo "[$(date)] recovery: env files repaired (owner broadcast, mode 600)"
+  if systemctl is-failed --quiet broadcast 2>/dev/null; then
+    echo "[$(date)] recovery: broadcast.service had failed; starting it"
+    systemctl reset-failed broadcast 2>/dev/null || true
+    systemctl start broadcast || echo "[$(date)] recovery: start command failed"
+  fi
+  return 0
 }
 
 function recover() {
@@ -113,11 +158,14 @@ function recover() {
   now=$(date +%s)
 
   local consecutive_failures=0 last_recovery_at=0
-  local container_started_at="" probes_since_start=0
+  local container_started_at="" probes_since_start=0 env_files_state=""
   if [ -f "$state_file" ]; then
     # shellcheck disable=SC1090
     source "$state_file" || true
   fi
+
+  # Every tick, before the guards below can return (see _recovery_secure_env_files)
+  _recovery_secure_env_files
 
   local container="${RECOVERY_CONTAINER:-app}"
 
