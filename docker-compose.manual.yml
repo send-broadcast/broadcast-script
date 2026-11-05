@@ -35,6 +35,7 @@ services:
       - /home/replace-with-your-user/broadcast/app/.env
     volumes:
       - /home/replace-with-your-user/broadcast/app/storage:/rails/storage
+      - /home/replace-with-your-user/broadcast/app/uploads:/rails/uploads
     networks:
       - broadcast-network
     depends_on:
