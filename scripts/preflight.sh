@@ -95,6 +95,21 @@ _preflight_plugin_warnings() {
   echo "$incompatible" | sed 's/^/  - /'
 }
 
+# Plugins (v3) on a deprecated plugin API major keep working until the date shown, then stop
+# until their developer moves them to the current major. A warning, never a reason to block.
+_preflight_plugin_api_warnings() {
+  local target_version="$1"
+  [[ "$target_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+
+  local deprecated limit=()
+  command -v timeout >/dev/null 2>&1 && limit=(timeout 60)
+  deprecated=$("${limit[@]}" docker exec app bin/rails plugins:deprecated_api 2>/dev/null) || return 0
+  [ -n "$deprecated" ] || return 0
+
+  echo -e "\e[33mPreflight: these plugins use a deprecated plugin API and need an update before the date shown:\e[0m"
+  echo "$deprecated" | sed 's/^/  - /'
+}
+
 # upgrade_preflight [--automated] [target_version]
 # Exit 0 = safe to proceed. Exit 1 = work in flight.
 function upgrade_preflight() {
@@ -108,6 +123,7 @@ function upgrade_preflight() {
   done
 
   _preflight_plugin_warnings "$target_version"
+  _preflight_plugin_api_warnings "$target_version"
 
   local deferral_file
   deferral_file=$(_preflight_deferral_file)

@@ -26,6 +26,7 @@ setup_sandbox() {
     # simulate in-flight work independently for jobs and broadcasts.
     harness_mock docker 'case "$*" in
   *plugins:incompatible*) printf "%s\n" "${PLUGINS_MOCK:-}" ;;
+  *plugins:deprecated_api*) printf "%s\n" "${DEPRECATED_MOCK:-}" ;;
   *pg_terminate_backend*) echo "${TERMINATED_MOCK:-0}" ;;
   *pg_stat_activity*) printf "%s\n" "${SESSIONS_MOCK:-}" ;;
   *solid_queue_claimed_executions*) echo "${CLAIMED_MOCK:-0}" ;;
@@ -55,9 +56,26 @@ test_preflight_warns_about_plugins_that_do_not_support_the_target_without_blocki
     harness_assert_called "docker exec app bin/rails plugins:incompatible[4.0.0]" "the app should be asked about the target version"
 }
 
+test_preflight_warns_about_plugins_on_a_deprecated_plugin_api_without_blocking() {
+    local output rc=0
+    output=$(sandbox_run "upgrade_preflight 4.0.0" 'export DEPRECATED_MOCK="acme.crm 1.2.0 uses pluginApi 1, which Broadcast serves until 2028-03-01"') || rc=$?
+
+    assert_equals "0" "$rc" "a deprecated plugin API must not block the upgrade"
+    assert_contains "$output" "acme.crm 1.2.0 uses pluginApi 1, which Broadcast serves until 2028-03-01" "the operator should see which plugin needs an update"
+    harness_assert_called "docker exec app bin/rails plugins:deprecated_api" "the app should be asked for plugins on a deprecated API"
+}
+
+test_preflight_says_nothing_about_the_plugin_api_when_no_plugin_is_on_a_deprecated_one() {
+    local output
+    output=$(sandbox_run "upgrade_preflight 4.0.0") || true
+
+    assert_equals "" "$(echo "$output" | /usr/bin/grep pluginApi)" "no warning without a plugin on a deprecated API"
+}
+
 test_preflight_does_not_pass_a_strange_target_to_the_app() {
     sandbox_run "upgrade_preflight '4.0.0;rm -rf /'" >/dev/null || true
     harness_assert_not_called "plugins:incompatible" "only a plain version may reach the app"
+    harness_assert_not_called "plugins:deprecated_api" "without a plain target version there is no upgrade to warn about"
 }
 
 test_preflight_blocks_while_a_job_is_mid_execution() {
@@ -235,6 +253,8 @@ run_preflight_tests() {
     run_test "test_automated_upgrade_defers_without_reporting_failure" test_automated_upgrade_defers_without_reporting_failure
     run_test "test_disconnect_terminates_client_backends" test_disconnect_terminates_client_backends
     run_test "test_preflight_warns_about_plugins_that_do_not_support_the_target_without_blocking" test_preflight_warns_about_plugins_that_do_not_support_the_target_without_blocking
+    run_test "test_preflight_warns_about_plugins_on_a_deprecated_plugin_api_without_blocking" test_preflight_warns_about_plugins_on_a_deprecated_plugin_api_without_blocking
+    run_test "test_preflight_says_nothing_about_the_plugin_api_when_no_plugin_is_on_a_deprecated_one" test_preflight_says_nothing_about_the_plugin_api_when_no_plugin_is_on_a_deprecated_one
     run_test "test_preflight_does_not_pass_a_strange_target_to_the_app" test_preflight_does_not_pass_a_strange_target_to_the_app
     run_test "test_disconnect_names_the_sessions_it_closed" test_disconnect_names_the_sessions_it_closed
     run_test "test_disconnect_never_aborts_when_postgres_is_unreachable" test_disconnect_never_aborts_when_postgres_is_unreachable
