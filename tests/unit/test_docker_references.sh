@@ -173,6 +173,21 @@ test_postgres_reaps_idle_transactions() {
         "postgres needs idle_in_transaction_session_timeout: an abandoned remote transaction holds locks indefinitely and blocks the migration that runs on app boot"
 }
 
+# A job reads the files people upload: CSV imports, deactivation lists, image
+# analysis. It needs the same uploads and storage mounts as the app. The manual
+# compose file had uploads on app only (2024-10 to 2026-11), so every CSV import
+# on a manual install failed with ActiveStorage::FileNotFoundError.
+test_job_mounts_uploads_and_storage_like_app() {
+    local file job_block
+    for file in "$PROJECT_ROOT/docker-compose.yml" "$PROJECT_ROOT/docker-compose.manual.yml"; do
+        job_block=$(COMPOSE_FILE="$file" compose_service_block job)
+        assert_contains "$job_block" ":/rails/uploads" \
+            "job in $(basename "$file") must mount /rails/uploads: jobs read uploaded files"
+        assert_contains "$job_block" ":/rails/storage" \
+            "job in $(basename "$file") must mount /rails/storage"
+    done
+}
+
 run_docker_reference_tests() {
     echo "Running Docker Reference Consistency Tests"
     echo "=========================================="
@@ -181,6 +196,7 @@ run_docker_reference_tests() {
 
     run_test "test_app_has_a_file_descriptor_limit" test_app_has_a_file_descriptor_limit
     run_test "test_job_has_a_file_descriptor_limit" test_job_has_a_file_descriptor_limit
+    run_test "test_job_mounts_uploads_and_storage_like_app" test_job_mounts_uploads_and_storage_like_app
     run_test "test_postgres_has_a_shutdown_grace_period" test_postgres_has_a_shutdown_grace_period
     run_test "test_postgres_reaps_idle_transactions" test_postgres_reaps_idle_transactions
     run_test "test_compose_file_parses" test_compose_file_parses

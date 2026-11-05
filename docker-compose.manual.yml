@@ -40,6 +40,7 @@ services:
       - /home/replace-with-your-user/broadcast/app/.env
     volumes:
       - /home/replace-with-your-user/broadcast/app/storage:/rails/storage
+      - /home/replace-with-your-user/broadcast/app/uploads:/rails/uploads
       - /home/replace-with-your-user/broadcast/secrets:/run/secrets:ro
     environment:
       BROADCAST_PLUGINS_SAFE_MODE: ${BROADCAST_PLUGINS_SAFE_MODE:-0}
