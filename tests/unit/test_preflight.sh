@@ -72,6 +72,21 @@ test_preflight_says_nothing_about_the_plugin_api_when_no_plugin_is_on_a_deprecat
     assert_equals "" "$(echo "$output" | /usr/bin/grep pluginApi)" "no warning without a plugin on a deprecated API"
 }
 
+test_preflight_warns_about_plugins_for_a_prerelease_target() {
+    local output rc=0
+    output=$(sandbox_run "upgrade_preflight 3.1.0-beta.2" 'export PLUGINS_MOCK="acme.crm 1.2.0 needs Broadcast >=3.2.0 <4.0.0"; export DEPRECATED_MOCK="acme.crm 1.2.0 uses pluginApi 1, which Broadcast serves until 2028-03-01"') || rc=$?
+
+    assert_equals "0" "$rc" "plugin warnings must not block a beta upgrade"
+    assert_contains "$output" "acme.crm 1.2.0 needs Broadcast" "a beta server upgrading to the next beta should see which plugin stops"
+    assert_contains "$output" "uses pluginApi 1" "a beta server should see plugins on a deprecated API"
+    harness_assert_called "docker exec app bin/rails plugins:incompatible[3.1.0-beta.2]" "the app should be asked about the prerelease target"
+}
+
+test_preflight_does_not_pass_a_strange_prerelease_target_to_the_app() {
+    sandbox_run "upgrade_preflight '3.1.0-beta.2;rm -rf /'" >/dev/null || true
+    harness_assert_not_called "plugins:incompatible" "only a plain version, with an optional plain prerelease, may reach the app"
+}
+
 test_preflight_does_not_pass_a_strange_target_to_the_app() {
     sandbox_run "upgrade_preflight '4.0.0;rm -rf /'" >/dev/null || true
     harness_assert_not_called "plugins:incompatible" "only a plain version may reach the app"
@@ -256,6 +271,8 @@ run_preflight_tests() {
     run_test "test_preflight_warns_about_plugins_on_a_deprecated_plugin_api_without_blocking" test_preflight_warns_about_plugins_on_a_deprecated_plugin_api_without_blocking
     run_test "test_preflight_says_nothing_about_the_plugin_api_when_no_plugin_is_on_a_deprecated_one" test_preflight_says_nothing_about_the_plugin_api_when_no_plugin_is_on_a_deprecated_one
     run_test "test_preflight_does_not_pass_a_strange_target_to_the_app" test_preflight_does_not_pass_a_strange_target_to_the_app
+    run_test "test_preflight_warns_about_plugins_for_a_prerelease_target" test_preflight_warns_about_plugins_for_a_prerelease_target
+    run_test "test_preflight_does_not_pass_a_strange_prerelease_target_to_the_app" test_preflight_does_not_pass_a_strange_prerelease_target_to_the_app
     run_test "test_disconnect_names_the_sessions_it_closed" test_disconnect_names_the_sessions_it_closed
     run_test "test_disconnect_never_aborts_when_postgres_is_unreachable" test_disconnect_never_aborts_when_postgres_is_unreachable
     run_test "test_upgrade_disconnects_clients_before_stopping_the_service" test_upgrade_disconnects_clients_before_stopping_the_service

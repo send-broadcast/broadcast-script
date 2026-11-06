@@ -80,11 +80,16 @@ function _preflight_count() {
   esac
 }
 
+# Only a plain version reaches the app: 3.1.0, or a prerelease such as 3.0.0-beta.1.
+_preflight_plain_version() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$ ]]
+}
+
 # Plugins (v3) whose manifest does not support the target version stop after the upgrade until
 # they are updated. A warning, never a reason to block. Only a plain version reaches the app.
 _preflight_plugin_warnings() {
   local target_version="$1"
-  [[ "$target_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+  _preflight_plain_version "$target_version" || return 0
 
   local incompatible limit=()
   command -v timeout >/dev/null 2>&1 && limit=(timeout 60)
@@ -99,7 +104,7 @@ _preflight_plugin_warnings() {
 # until their developer moves them to the current major. A warning, never a reason to block.
 _preflight_plugin_api_warnings() {
   local target_version="$1"
-  [[ "$target_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 0
+  _preflight_plain_version "$target_version" || return 0
 
   local deprecated limit=()
   command -v timeout >/dev/null 2>&1 && limit=(timeout 60)
