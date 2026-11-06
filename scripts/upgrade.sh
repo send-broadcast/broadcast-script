@@ -134,7 +134,7 @@ function _upgrade_continue() {
   _arm_service_failsafe "Upgrade"
 
   if [ -z "$target_version" ]; then
-    target_version="latest"
+    target_version="$(release_channel_tag)"
   fi
 
   # Install post-upgrade cleanup service if not present (for upgrades from older versions)
@@ -243,7 +243,7 @@ function _upgrade_continue() {
   # Log version change to history
   log_version_change "upgrade" "$current_version" "$target_version"
 
-  if [ "$target_version" != "latest" ]; then
+  if [ "$target_version" != "latest" ] && [ "$target_version" != "beta" ]; then
     echo -e "\e[32mBroadcast upgrade to version $target_version completed successfully!\e[0m"
   else
     echo -e "\e[32mBroadcast upgrade completed successfully!\e[0m"

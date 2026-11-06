@@ -346,6 +346,14 @@ test_fix_regenerates_missing_image_file() {
     assert_contains "$output" "fixed:" "the repair must be reported"
 }
 
+test_fix_image_defaults_to_beta_on_the_beta_branch() {
+    rm -f "$SANDBOX_ROOT/.image" "$SANDBOX_ROOT/.current_version"
+    # /opt/broadcast is a checkout of the beta branch
+    harness_mock git 'case "$*" in *symbolic-ref*) echo beta ;; esac; exit 0'
+    sandbox_run "fix" "$FIX_ENV" >/dev/null
+    assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":beta" "a beta server with no version record is repaired to beta"
+}
+
 test_fix_image_defaults_to_latest_without_version_file() {
     rm -f "$SANDBOX_ROOT/.image" "$SANDBOX_ROOT/.current_version"
 
@@ -622,6 +630,7 @@ run_fix_tests() {
     run_test "test_fix_installs_inotify_tools_when_missing" test_fix_installs_inotify_tools_when_missing
     run_test "test_fix_regenerates_missing_image_file" test_fix_regenerates_missing_image_file
     run_test "test_fix_image_defaults_to_latest_without_version_file" test_fix_image_defaults_to_latest_without_version_file
+    run_test "test_fix_image_defaults_to_beta_on_the_beta_branch" test_fix_image_defaults_to_beta_on_the_beta_branch
     run_test "test_fix_preserves_existing_image_file" test_fix_preserves_existing_image_file
     run_test "test_fix_fails_when_db_env_missing" test_fix_fails_when_db_env_missing
     run_test "test_fix_installs_missing_compose_plugin" test_fix_installs_missing_compose_plugin

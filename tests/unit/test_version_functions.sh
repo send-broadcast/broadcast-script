@@ -128,6 +128,14 @@ test_set_docker_image_arm64() {
     assert_contains "$image" "TARGETARCH=arm64" "arm64 must set TARGETARCH"
 }
 
+test_set_docker_image_defaults_to_beta_on_the_beta_branch() {
+    # /opt/broadcast is a checkout of the beta branch
+    harness_mock git 'case "$*" in *symbolic-ref*) echo beta ;; esac; exit 0'
+    sandbox_run "set_docker_image" >/dev/null
+    assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":beta" "a beta-branch server follows the beta image"
+    assert_equals "beta" "$(cat "$SANDBOX_ROOT/.current_version")" ".current_version should be beta"
+}
+
 test_set_docker_image_defaults_to_latest() {
     sandbox_run "set_docker_image" >/dev/null
     assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":latest" "no argument should mean :latest"
@@ -253,6 +261,7 @@ run_version_function_tests() {
     run_test "test_set_docker_image_amd64" test_set_docker_image_amd64
     run_test "test_set_docker_image_arm64" test_set_docker_image_arm64
     run_test "test_set_docker_image_defaults_to_latest" test_set_docker_image_defaults_to_latest
+    run_test "test_set_docker_image_defaults_to_beta_on_the_beta_branch" test_set_docker_image_defaults_to_beta_on_the_beta_branch
     run_test "test_generate_encryption_keys_adds_all_three_keys" test_generate_encryption_keys_adds_all_three_keys
     run_test "test_generate_encryption_keys_is_idempotent" test_generate_encryption_keys_is_idempotent
     run_test "test_generate_encryption_keys_fills_empty_values" test_generate_encryption_keys_fills_empty_values

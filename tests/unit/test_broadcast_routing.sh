@@ -127,6 +127,17 @@ main restore") || rc=$?
         "the real restore validation should reject the empty argument"
 }
 
+test_install_pins_image_to_beta_on_the_beta_branch() {
+    # /opt/broadcast is a checkout of the beta branch
+    harness_mock git 'case "$*" in *symbolic-ref*) echo beta ;; esac; exit 0'
+    local output
+    output=$(sandbox_run "$GUARD_STUBS
+install() { echo \"INSTALL_CALLED image=\$(cat \"$SANDBOX_ROOT/.image\" | head -1)\"; }
+main install")
+    assert_contains "$output" "INSTALL_CALLED image=DOCKER_IMAGE=gitea.hostedapp.org/broadcast/broadcast:beta" \
+        "an install from the beta branch must pin :beta"
+}
+
 test_install_pins_image_to_latest_before_installing() {
     local output
     output=$(sandbox_run "$GUARD_STUBS
@@ -189,6 +200,7 @@ run_broadcast_routing_tests() {
     run_test "test_restore_forwards_file_and_confirmation_flag" test_restore_forwards_file_and_confirmation_flag
     run_test "test_restore_without_file_reaches_real_validation" test_restore_without_file_reaches_real_validation
     run_test "test_install_pins_image_to_latest_before_installing" test_install_pins_image_to_latest_before_installing
+    run_test "test_install_pins_image_to_beta_on_the_beta_branch" test_install_pins_image_to_beta_on_the_beta_branch
     run_test "test_monitor_toggle_commands_route_to_their_functions" test_monitor_toggle_commands_route_to_their_functions
     run_test "test_simple_commands_route_to_their_functions" test_simple_commands_route_to_their_functions
 

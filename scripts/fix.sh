@@ -196,10 +196,10 @@ function fix() {
     fix_ok ".image present (existing pin preserved)"
   else
     local pinned
-    pinned=$(cat /opt/broadcast/.current_version 2>/dev/null || echo latest)
+    pinned=$(cat /opt/broadcast/.current_version 2>/dev/null || release_channel_tag)
     set_docker_image "$pinned" > /dev/null
-    if [ "$pinned" = "latest" ]; then
-      fix_did "regenerated .image (no version record found — pinned to latest)"
+    if [ "$pinned" = "latest" ] || [ "$pinned" = "beta" ]; then
+      fix_did "regenerated .image (no version record found — pinned to $pinned)"
     else
       fix_did "regenerated .image for installed version $pinned"
     fi

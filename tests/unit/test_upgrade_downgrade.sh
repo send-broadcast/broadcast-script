@@ -85,6 +85,13 @@ test_upgrade_continue_full_sequence_with_version() {
         "version history should record from/to versions"
 }
 
+test_upgrade_continue_defaults_to_beta_on_the_beta_branch() {
+    # /opt/broadcast is a checkout of the beta branch
+    harness_mock git 'case "$*" in *symbolic-ref*) echo beta ;; esac; exit 0'
+    sandbox_run "_upgrade_continue" >/dev/null
+    assert_contains "$(cat "$SANDBOX_ROOT/.image")" ":beta" "no version on a beta server should mean :beta, never back to latest (2.x)"
+}
+
 test_upgrade_continue_defaults_to_latest() {
     sandbox_run "_upgrade_continue" >/dev/null
 
@@ -397,6 +404,7 @@ run_upgrade_downgrade_tests() {
     run_test "test_downgrade_updates_before_stopping" test_downgrade_updates_before_stopping
     run_test "test_upgrade_continue_full_sequence_with_version" test_upgrade_continue_full_sequence_with_version
     run_test "test_upgrade_continue_defaults_to_latest" test_upgrade_continue_defaults_to_latest
+    run_test "test_upgrade_continue_defaults_to_beta_on_the_beta_branch" test_upgrade_continue_defaults_to_beta_on_the_beta_branch
     run_test "test_upgrade_continue_installs_cleanup_service_when_missing" test_upgrade_continue_installs_cleanup_service_when_missing
     run_test "test_upgrade_continue_skips_cleanup_service_when_present" test_upgrade_continue_skips_cleanup_service_when_present
     run_test "test_upgrade_continue_installs_logs_watcher_when_not_enabled" test_upgrade_continue_installs_logs_watcher_when_not_enabled

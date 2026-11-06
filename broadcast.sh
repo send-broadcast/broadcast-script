@@ -157,8 +157,18 @@ function check_and_set_safe_directory() {
   fi
 }
 
+# The rolling image tag this server follows: beta on a checkout of the beta branch (Broadcast 3
+# beta), latest everywhere else. Install, an upgrade with no version and fix use it.
+function release_channel_tag() {
+  if [ "$(git -C /opt/broadcast symbolic-ref --short -q HEAD 2>/dev/null)" = "beta" ]; then
+    echo beta
+  else
+    echo latest
+  fi
+}
+
 function set_docker_image() {
-  local version="${1:-latest}"
+  local version="${1:-$(release_channel_tag)}"
   local image_file="/opt/broadcast/.image"
   local version_file="/opt/broadcast/.current_version"
 
@@ -201,7 +211,7 @@ main() {
     install)
       # Only set docker image to latest for fresh installs
       # Upgrade/downgrade commands set specific versions
-      set_docker_image "latest"
+      set_docker_image "$(release_channel_tag)"
       install
       ;;
     upgrade)
