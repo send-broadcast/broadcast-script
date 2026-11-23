@@ -1,5 +1,20 @@
 # TODO
 
+## CI upgrade dry run (2026-11-23, main)
+
+The demo server (demobroadcast, Hetzner CX23) moves to minirails2 behind
+kamal-proxy, so it stops being an x86 dry run of the installer upgrade path.
+A CI job takes over that job (Simon's choice: workflow in this repo, started
+by the broadcast repo's release tag build).
+
+- [x] `BROADCAST_VERSION` pins the install version (tests in test_broadcast_routing.sh)
+- [x] `.github/workflows/upgrade-dry-run.yml` (repository_dispatch + manual)
+- [x] CHANGELOG
+- [ ] Secret `BROADCAST_LICENSE_KEY` in this repo (license for smoke-test.local)
+- [ ] broadcast repo: dispatch job after the amd64 tag build + token secret
+- [ ] First manual run (3.5.2 -> 3.6.0) passes
+- [ ] Move the demo to minirails2 (separate work)
+
 ## Gitignore the runtime files (2026-10-06, branch `gitignore-runtime-state`)
 
 Found on a fresh 24.04 VM install: `git status` in `/opt/broadcast` listed

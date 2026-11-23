@@ -150,6 +150,35 @@ main install")
         ".current_version should be set before install runs"
 }
 
+test_install_pins_image_to_broadcast_version_when_set() {
+    # CI's upgrade dry run installs the previous release, then upgrades it
+    local output
+    output=$(sandbox_run "$GUARD_STUBS
+install() { echo \"INSTALL_CALLED image=\$(cat \"$SANDBOX_ROOT/.image\" | head -1)\"; }
+main install" "export BROADCAST_VERSION=3.5.2")
+
+    assert_contains "$output" "INSTALL_CALLED image=DOCKER_IMAGE=gitea.hostedapp.org/broadcast/broadcast:3.5.2" \
+        "install must pin the image to BROADCAST_VERSION"
+    assert_equals "3.5.2" "$(cat "$SANDBOX_ROOT/.current_version")" \
+        ".current_version should be BROADCAST_VERSION"
+}
+
+test_install_rejects_a_malformed_broadcast_version() {
+    # .image is sourced by the shell, so the value must never carry shell syntax
+    local output rc=0
+    output=$(sandbox_run "$GUARD_STUBS
+install() { echo INSTALL_CALLED; }
+main install" "export BROADCAST_VERSION='3.5.2; touch $SANDBOX_ROOT/pwned'") || rc=$?
+
+    assert_equals "1" "$rc" "a malformed BROADCAST_VERSION must stop the install"
+    assert_contains "$output" "BROADCAST_VERSION" "the error should name the variable"
+    case "$output" in
+        *INSTALL_CALLED*) assert_equals "not called" "called" "install must not run" ;;
+    esac
+    assert_file_not_exists "$SANDBOX_ROOT/.image" ".image must not be written"
+    assert_file_not_exists "$SANDBOX_ROOT/pwned" "the value must never run as shell code"
+}
+
 test_monitor_toggle_commands_route_to_their_functions() {
     local output
     output=$(sandbox_run "$GUARD_STUBS
@@ -201,6 +230,8 @@ run_broadcast_routing_tests() {
     run_test "test_restore_without_file_reaches_real_validation" test_restore_without_file_reaches_real_validation
     run_test "test_install_pins_image_to_latest_before_installing" test_install_pins_image_to_latest_before_installing
     run_test "test_install_pins_image_to_beta_on_the_beta_branch" test_install_pins_image_to_beta_on_the_beta_branch
+    run_test "test_install_pins_image_to_broadcast_version_when_set" test_install_pins_image_to_broadcast_version_when_set
+    run_test "test_install_rejects_a_malformed_broadcast_version" test_install_rejects_a_malformed_broadcast_version
     run_test "test_monitor_toggle_commands_route_to_their_functions" test_monitor_toggle_commands_route_to_their_functions
     run_test "test_simple_commands_route_to_their_functions" test_simple_commands_route_to_their_functions
 

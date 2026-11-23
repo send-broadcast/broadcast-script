@@ -210,8 +210,19 @@ main() {
   case "$1" in
     install)
       # Only set docker image to latest for fresh installs
-      # Upgrade/downgrade commands set specific versions
-      set_docker_image "$(release_channel_tag)"
+      # Upgrade/downgrade commands set specific versions.
+      # BROADCAST_VERSION pins an older release (CI's upgrade dry run). It
+      # ends up in .image, which the shell sources, so only a plain version
+      # or channel name is accepted.
+      if [ -n "${BROADCAST_VERSION:-}" ]; then
+        if ! [[ "$BROADCAST_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?|latest|beta|edge)$ ]]; then
+          echo -e "\e[31mError: BROADCAST_VERSION '$BROADCAST_VERSION' is not a version (3.6.0, 3.1.0-beta.2, latest, beta or edge).\e[0m"
+          exit 1
+        fi
+        set_docker_image "$BROADCAST_VERSION"
+      else
+        set_docker_image "$(release_channel_tag)"
+      fi
       install
       ;;
     upgrade)

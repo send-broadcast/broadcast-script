@@ -1,0 +1,161 @@
+name: Upgrade dry run
+
+# Installs the previous Broadcast release on a fresh x86 Ubuntu VM the way a
+# customer does (./broadcast.sh install), fills it with the demo data, then
+# runs the customer upgrade path (./broadcast.sh upgrade <new>) and checks
+# that the server comes back with its data. It replaces the dry run that the
+# demo server gave when it was the only box on the real installer layout.
+#
+# Started by the broadcast repo after its amd64 image build for a v* tag
+# (repository_dispatch "release-image-built" with from_version/to_version),
+# or by hand.
+#
+# Secret: BROADCAST_LICENSE_KEY, a license for the domain smoke-test.local
+# (the same license as tests/smoke/.smoke-test.env).
+
+on:
+  repository_dispatch:
+    types: [release-image-built]
+  workflow_dispatch:
+    inputs:
+      from_version:
+        description: 'Release to install first (for example 3.5.2)'
+        required: true
+      to_version:
+        description: 'Release to upgrade to (for example 3.6.0)'
+        required: true
+
+concurrency:
+  group: upgrade-dry-run-${{ github.event.client_payload.to_version || inputs.to_version }}
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    # GitHub-hosted, not the shared self-hosted runner: the install changes
+    # the whole machine (ufw, fail2ban, systemd, cron), and the shared box
+    # has 4 GB of RAM and is killed by OOM under load.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      FROM_VERSION: ${{ github.event.client_payload.from_version || inputs.from_version }}
+      TO_VERSION: ${{ github.event.client_payload.to_version || inputs.to_version }}
+      DOMAIN: smoke-test.local
+
+    steps:
+      - name: Check the versions
+        run: |
+          for v in "$FROM_VERSION" "$TO_VERSION"; do
+            if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+              echo "::error::'$v' is not a release version"
+              exit 1
+            fi
+          done
+          echo "Upgrade dry run: $FROM_VERSION -> $TO_VERSION"
+
+      # A clone, not actions/checkout: upgrade runs `broadcast.sh update`,
+      # which pulls origin, exactly as on a customer server.
+      - name: Clone the scripts into /opt/broadcast
+        run: |
+          sudo git clone --quiet --branch "${GITHUB_REF_NAME:-main}" \
+            "https://github.com/${GITHUB_REPOSITORY}.git" /opt/broadcast
+          sudo git -C /opt/broadcast log --oneline -1
+
+      - name: Prepare the install (domain, license, registry login)
+        env:
+          LICENSE: ${{ secrets.BROADCAST_LICENSE_KEY }}
+        run: |
+          if [ -z "$LICENSE" ]; then
+            echo "::error::The BROADCAST_LICENSE_KEY secret is not set"
+            exit 1
+          fi
+          response=$(curl -sf -X POST -H "Content-Type: application/json" \
+            -d "{\"key\":\"${LICENSE}\", \"domain\":\"${DOMAIN}\"}" \
+            https://sendbroadcast.net/license/check) || { echo "::error::License check failed"; exit 1; }
+          url=$(jq -r .registry_url <<<"$response")
+          login=$(jq -r .registry_login <<<"$response")
+          password=$(jq -r .registry_password <<<"$response")
+          echo "::add-mask::$login"
+          echo "::add-mask::$password"
+
+          sudo mkdir -p /opt/broadcast/{app,db,ssl,logs,logs/cron}
+          echo "$DOMAIN" | sudo tee /opt/broadcast/.domain >/dev/null
+          echo "$LICENSE" | sudo tee /opt/broadcast/.license >/dev/null
+          printf 'BROADCAST_REGISTRY_URL=%s\nBROADCAST_REGISTRY_LOGIN=%s\nBROADCAST_REGISTRY_PASSWORD=%s\n' \
+            "$url" "$login" "$password" | sudo tee /opt/broadcast/.env >/dev/null
+          sudo chmod +x /opt/broadcast/broadcast.sh
+          sudo chmod -R o+rX /opt/broadcast/db/init-scripts
+
+      - name: Install the previous release (${{ env.FROM_VERSION }})
+        run: |
+          cd /opt/broadcast
+          sudo BROADCAST_NO_REBOOT=1 BROADCAST_VERSION="$FROM_VERSION" ./broadcast.sh install
+
+      - name: Wait for the previous release to serve
+        run: |
+          for i in $(seq 1 40); do
+            curl -sf http://localhost/up >/dev/null && exit 0
+            sleep 10
+          done
+          echo "::error::$FROM_VERSION did not answer /up"
+          exit 1
+
+      - name: Fill the demo data
+        run: |
+          # DEMO_MODE=true is what the demo server runs with; cleanup:demo seeds it
+          echo "DEMO_MODE=true" | sudo tee -a /opt/broadcast/app/.env >/dev/null
+          sudo systemctl restart broadcast
+          for i in $(seq 1 40); do curl -sf http://localhost/up >/dev/null && break; sleep 10; done
+          sudo docker exec app bundle exec rake cleanup:demo
+
+      - name: Count the records before the upgrade
+        run: |
+          counts=$(sudo docker exec app bin/rails runner \
+            'puts [User, BroadcastChannel, Subscriber, Broadcast, Sequence, Segment, Template].map { |m| "#{m.name}=#{m.count}" }.join(" ")' | tail -1)
+          echo "Before: $counts"
+          echo "$counts" > "$RUNNER_TEMP/before.txt"
+          if [[ "$counts" =~ (^|\ )Subscriber=0(\ |$) ]]; then
+            echo "::error::The demo seed made no subscribers, so the dry run proves nothing"
+            exit 1
+          fi
+
+      - name: Upgrade to ${{ env.TO_VERSION }} (the customer path)
+        run: |
+          cd /opt/broadcast
+          sudo ./broadcast.sh upgrade "$TO_VERSION"
+
+      - name: Check the upgraded server
+        run: |
+          set -e
+          for i in $(seq 1 40); do curl -sf http://localhost/up >/dev/null && break; sleep 10; done
+          curl -sf http://localhost/up >/dev/null || { echo "::error::$TO_VERSION did not answer /up"; exit 1; }
+
+          for c in app job postgres; do
+            [ "$(sudo docker inspect -f '{{.State.Running}}' "$c")" = "true" ] || { echo "::error::container $c is not running"; exit 1; }
+          done
+
+          image=$(sudo docker inspect -f '{{.Config.Image}}' app)
+          echo "app image: $image"
+          [[ "$image" == *":$TO_VERSION" ]] || { echo "::error::app runs $image, not $TO_VERSION"; exit 1; }
+          [ "$(cat /opt/broadcast/.current_version)" = "$TO_VERSION" ] || { echo "::error::.current_version is not $TO_VERSION"; exit 1; }
+
+          pending=$(sudo docker exec app bin/rails db:migrate:status 2>/dev/null | grep -c '^\s*down' || true)
+          [ "$pending" = "0" ] || { echo "::error::$pending migrations are still down"; exit 1; }
+
+          after=$(sudo docker exec app bin/rails runner \
+            'puts [User, BroadcastChannel, Subscriber, Broadcast, Sequence, Segment, Template].map { |m| "#{m.name}=#{m.count}" }.join(" ")' | tail -1)
+          before=$(cat "$RUNNER_TEMP/before.txt")
+          echo "Before: $before"
+          echo "After:  $after"
+          [ "$before" = "$after" ] || { echo "::error::The upgrade changed the record counts"; exit 1; }
+
+          systemctl is-active --quiet broadcast-logs-watcher || { echo "::error::broadcast-logs-watcher is not active"; exit 1; }
+
+      - name: The demo reset still works on ${{ env.TO_VERSION }}
+        run: sudo docker exec app bundle exec rake cleanup:demo
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          sudo docker ps -a || true
+          for c in app job postgres; do echo "== $c"; sudo docker logs --tail 150 "$c" 2>&1 || true; done
+          sudo journalctl -u broadcast --no-pager -n 100 || true
