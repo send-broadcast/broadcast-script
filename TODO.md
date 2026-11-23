@@ -10,7 +10,9 @@ by the broadcast repo's release tag build).
 - [x] `BROADCAST_VERSION` pins the install version (tests in test_broadcast_routing.sh)
 - [x] `.github/workflows/upgrade-dry-run.yml` (repository_dispatch + manual)
 - [x] CHANGELOG
-- [ ] Secret `BROADCAST_LICENSE_KEY` in this repo (license for smoke-test.local)
+- [x] Secret `BROADCAST_LICENSE_KEY` in this repo (license for smoke-test.local)
+- [x] Run on ci-runner-home in an LXD container, never on the host (Simon, 2026-11-23: host also serves the prod Tang key)
+- [ ] ops: install LXD on ci-runner-home, runner user in the lxd group
 - [ ] broadcast repo: dispatch job after the amd64 tag build + token secret
 - [ ] First manual run (3.5.2 -> 3.6.0) passes
 - [ ] Move the demo to minirails2 (separate work)
