@@ -1,7 +1,7 @@
 #!/bin/bash
 # The upgrade dry run, run as root inside a fresh disposable Ubuntu system
-# container (.github/workflows/upgrade-dry-run.yml starts it with LXD on the
-# home runner). Never run this on a real server or on a CI host: it installs
+# container (the broadcast repo's .github/workflows/upgrade-dry-run.yml starts
+# it with LXD on the home runner). Never run this on a real server or on a CI host: it installs
 # Broadcast with ufw, fail2ban, Docker and root cron.
 #
 #   upgrade_dry_run.sh <from_version> <to_version> <branch>

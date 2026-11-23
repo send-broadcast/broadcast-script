@@ -8,12 +8,13 @@ A CI job takes over that job (Simon's choice: workflow in this repo, started
 by the broadcast repo's release tag build).
 
 - [x] `BROADCAST_VERSION` pins the install version (tests in test_broadcast_routing.sh)
-- [x] `.github/workflows/upgrade-dry-run.yml` (repository_dispatch + manual)
+- [x] ~~`.github/workflows/upgrade-dry-run.yml` here~~ moved to the broadcast repo: this repo is public, the home runner group takes private repos only (2026-11-23)
+- [x] `tests/ci/upgrade_dry_run.sh` (steps inside the container)
 - [x] CHANGELOG
 - [x] Secret `BROADCAST_LICENSE_KEY` in this repo (license for smoke-test.local)
 - [x] Run on ci-runner-home in an LXD container, never on the host (Simon, 2026-11-23: host also serves the prod Tang key)
-- [ ] ops: install LXD on ci-runner-home, runner user in the lxd group
-- [ ] broadcast repo: dispatch job after the amd64 tag build + token secret
+- [x] ops: LXD on ci-runner-home, runner user in the lxd group (2026-11-23)
+- [x] broadcast repo: `upgrade-dry-run.yml` (reusable), called by the amd64 tag build; no token needed
 - [ ] First manual run (3.5.2 -> 3.6.0) passes
 - [ ] Move the demo to minirails2 (separate work)
 
