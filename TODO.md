@@ -15,7 +15,7 @@ by the broadcast repo's release tag build).
 - [x] Run on ci-runner-home in an LXD container, never on the host (Simon, 2026-11-23: host also serves the prod Tang key)
 - [x] ops: LXD on ci-runner-home, runner user in the lxd group (2026-11-23)
 - [x] broadcast repo: `upgrade-dry-run.yml` (reusable), called by the amd64 tag build; no token needed
-- [ ] First manual run (3.5.2 -> 3.6.0) passes
+- [x] First manual run (3.5.2 -> 3.6.0) passed on ci-runner-home in LXD, 3.5 min (broadcast run 45243771958, 2026-11-23)
 - [ ] Move the demo to minirails2 (separate work)
 
 ## Gitignore the runtime files (2026-10-06, branch `gitignore-runtime-state`)
